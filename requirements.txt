@@ -1,0 +1,41 @@
+# ==== Deep Learning core ====
+# Cài torch theo đúng bản CUDA của máy bạn TRƯỚC (xem https://pytorch.org/get-started/locally/),
+# ví dụ máy có CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# rồi mới cài các package còn lại trong file này.
+torch
+torchvision
+
+# ==== Tách cảnh + đọc video ====
+scenedetect[opencv]
+opencv-python
+
+# ==== Speech-to-Text (Whisper, đa ngôn ngữ, hỗ trợ tiếng Việt) ====
+faster-whisper
+
+# ==== CLIP (image encoder) ====
+open_clip_torch
+
+# ==== OCR (đọc chữ vi + en trong ảnh) ====
+easyocr
+
+# ==== BGE-M3 (text embedding) + bge-reranker-v2-m3 (CrossEncoder rerank) ====
+FlagEmbedding
+
+# ==== Vector search ====
+# faiss-gpu qua pip khá bấp bênh (thường phải cài qua conda: `conda install -c pytorch faiss-gpu`).
+# faiss-cpu vẫn đủ nhanh cho việc SEARCH (bottleneck chính nằm ở bước ENCODE bằng GPU, không phải
+# bước search FAISS), nên mặc định dùng faiss-cpu cho chắc, nếu môi trường có conda + GPU rảnh thì
+# đổi sang faiss-gpu để tăng tốc thêm bước build index.
+faiss-cpu
+
+# ==== Gemini API (caption + verify) ====
+google-generativeai
+
+# ==== UI ====
+streamlit
+
+# ==== Tiện ích ====
+Pillow
+numpy
+tqdm
