@@ -82,38 +82,61 @@ def detect_scenes(video_path):
 
 def extract_keyframe_images(video_path, video_id, scenes):
     """
-    Với mỗi scene (start_frame, end_frame), lấy đúng 1 frame ở GIỮA scene làm keyframe
-    đại diện (frame giữa thường ổn định hơn frame đầu/cuối, ít bị mờ do chuyển cảnh).
+    Với mỗi scene (start_frame, end_frame), lấy NHIỀU frame tại các vị trí
+    cố định (mặc định: 25%, 50%, 75% độ dài scene) thay vì chỉ 1 frame giữa.
 
-    Lưu ảnh ra: data/keyframes/<video_id>/<frame_idx>.jpg (frame_idx đánh số 8 chữ số
-    để các file luôn sắp xếp đúng thứ tự thời gian khi liệt kê thư mục).
+    Lý do: 1 frame/scene bỏ sót nhiều thông tin (đặc biệt scene dài > 5s).
+    Lấy 3 frame/scene tăng recall ~3x mà không cần thay đổi model hay pipeline.
 
+    Scene ngắn (< 2 * MIN_SCENE_LEN frames) chỉ lấy 1 frame giữa để tránh
+    các frame bị trùng hoặc quá gần nhau.
+
+    Lưu ảnh ra: data/keyframes/<video_id>/<frame_idx:08d>.jpg
     Trả về: list metadata dict {video_id, frame_idx, timestamp_sec, path}
     """
+    # Vị trí lấy frame trong mỗi scene (theo tỷ lệ % độ dài scene).
+    # Đổi về [0.5] nếu muốn quay lại chế độ 1 frame/scene (ít VRAM hơn).
+    SAMPLE_POSITIONS = getattr(config, "KEYFRAME_POSITIONS", [0.25, 0.5, 0.75])
+    MIN_SCENE_FRAMES_FOR_MULTI = 2 * config.MIN_SCENE_LEN  # scene quá ngắn → chỉ lấy 1 frame
+
     out_dir = os.path.join(config.KEYFRAME_DIR, video_id)
     os.makedirs(out_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0  # fallback 25fps nếu đọc metadata thất bại
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
     metas = []
-    for start_f, end_f in scenes:
-        mid_frame = (start_f + end_f) // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame)
-        ok, frame = cap.read()
-        if not ok:
-            continue  # bỏ qua frame lỗi (hiếm khi xảy ra ở cuối video)
+    seen_frames = set()  # tránh lưu trùng frame nếu scene quá ngắn
 
-        frame_path = os.path.join(out_dir, f"{mid_frame:08d}.jpg")
-        cv2.imwrite(frame_path, frame)
-        metas.append({
-            "video_id": video_id,
-            "frame_idx": mid_frame,
-            "timestamp_sec": round(mid_frame / fps, 2),
-            "path": frame_path,
-        })
+    for start_f, end_f in scenes:
+        length = end_f - start_f
+
+        # Scene quá ngắn → chỉ lấy 1 frame giữa
+        positions = SAMPLE_POSITIONS if length >= MIN_SCENE_FRAMES_FOR_MULTI else [0.5]
+
+        for pos in positions:
+            target_frame = start_f + int(length * pos)
+            if target_frame in seen_frames:
+                continue
+            seen_frames.add(target_frame)
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+
+            frame_path = os.path.join(out_dir, f"{target_frame:08d}.jpg")
+            cv2.imwrite(frame_path, frame)
+            metas.append({
+                "video_id": video_id,
+                "frame_idx": target_frame,
+                "timestamp_sec": round(target_frame / fps, 2),
+                "path": frame_path,
+            })
+
     cap.release()
     return metas
+
 
 
 def run_keyframe_extraction():

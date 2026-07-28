@@ -7,7 +7,7 @@ VIDEO ─┬─ PySceneDetect ──────────► Keyframes
        └─ Whisper (vi+en) ───────► Transcript
 
 Keyframes ─┬─ CLIP (image)  ──────────────► FAISS Image Index
-           ├─ Gemini caption(en) ─ BGE-M3 ─┐
+           ├─ Gwen2-VL caption(en) ─ BGE-M3 ─┐
            └─ EasyOCR (vi+en)   ─ BGE-M3 ──┼──► FAISS Text Index
 Transcript ────────────────────── BGE-M3 ──┘
 
@@ -63,60 +63,7 @@ chạy lại đúng lệnh trên sẽ tiếp tục từ chỗ dang dở, không 
 Muốn build lại từ đầu 1 bước nào đó, xoá file cache tương ứng trong `cache/` hoặc
 `index/` rồi chạy lại.
 
-## 3. Dataset để luyện tập (ĐÃ ĐƯỢC ĐẶT SẴN VÀO `data/videos/`)
-
-Mình đã tải sẵn **6 video mẫu nhẹ (~24MB tổng)** từ repo
-[`intel-iot-devkit/sample-videos`](https://github.com/intel-iot-devkit/sample-videos)
-(license **CC-BY 4.0** — dùng thoải mái cho mục đích luyện tập/nghiên cứu, chỉ cần
-giữ ghi công) và bỏ thẳng vào `data/videos/` — bạn **không cần tải gì thêm**,
-chạy `extract_keyframes.py` là dùng được ngay:
-
-| File | Nội dung | Dung lượng |
-|---|---|---|
-| `bottle-detection.mp4` | chai lọ trên băng chuyền | 0.5 MB |
-| `car-detection.mp4` | xe cộ ngoài đường | 2.8 MB |
-| `one-by-one-person-detection.mp4` | người đi qua camera lần lượt | 3.2 MB |
-| `people-detection.mp4` | nhiều người đi lại | 5.4 MB |
-| `person-bicycle-car-detection.mp4` | người + xe đạp + ô tô | 6.0 MB |
-| `face-demographics-walking.mp4` | người đi bộ, cận mặt | 6.4 MB |
-
-**Lưu ý quan trọng:** đây là video giám sát (surveillance demo) của Intel/OpenVINO,
-**hầu như không có lời thoại** — nên nhánh Whisper (transcript) sẽ gần như rỗng với
-bộ này. Bộ dataset này dùng để test NHANH phần cơ khí của pipeline (tách cảnh →
-keyframe → CLIP → OCR → FAISS → search ảnh) bằng tiếng Anh (vd: query thử
-"a person riding a bicycle", "bottles on a conveyor belt"). Khi cần test riêng
-nhánh Whisper tiếng Việt + OCR tiếng Việt + query tiếng Việt, xem gợi ý (c) bên dưới
-để có thêm video tiếng Việt thật.
-
-Ngoài bộ đã có sẵn, vẫn còn 2 nguồn khác nếu muốn mở rộng:
-
-**a) BetterDay-Tool (open-source từ chính AI Challenge HCMC 2023)**
-Repo: `github.com/Nhathuy1305/BetterDay-Tool` — đây là 1 video search engine
-mã nguồn mở được đơn giản hoá từ prototype dự thi AIC 2023 thật, kèm theo
-1 bộ demo dataset nhỏ (tải qua Weaviate Cloud dataset trong repo). Rất đáng xem
-qua vì gần sát nhất với format dữ liệu (tin tức tiếng Việt) và cách các đội khác
-đã giải bài toán này.
-
-**b) MSR-VTT (subset nhỏ)**
-Bộ dữ liệu video-text retrieval chuẩn trong nghiên cứu (10.000 video clip ngắn
-kèm caption tiếng Anh). Chỉ cần tải một vài chục clip đầu là đủ để test cơ khí
-toàn bộ pipeline (tách cảnh → keyframe → CLIP/BGE-M3 → FAISS → search) mà không
-cần tải hết vài chục GB. Phù hợp để kiểm tra pipeline chạy đúng logic (tiếng Anh),
-trước khi thử với video tiếng Việt thật.
-
-**c) Video tiếng Việt thật (để test riêng nhánh Whisper vi + OCR vi + query vi)**
-Tự tải vài video công khai (tin tức, vlog ngắn) bằng `yt-dlp` để có dữ liệu tiếng
-Việt thật kiểm tra chất lượng ASR/OCR tiếng Việt — vì MSR-VTT và phần lớn dataset
-academic chuẩn đều chỉ có tiếng Anh. Nhớ chỉ dùng cho mục đích thử nghiệm nội bộ,
-không dùng lại nội dung có bản quyền cho sản phẩm cuối.
-
-> Khi có dữ liệu thật từ BTC: cấu trúc thư mục/pipeline không đổi, chỉ cần copy
-> video thật vào `data/videos/` và chạy lại bước 1–2. Với dataset lớn (hàng nghìn
-> giờ video như các năm trước — AIC 2024 có 1.471 video / 328 giờ), nên cân nhắc
-> đổi `faiss.IndexFlatIP` sang `faiss.IndexIVFFlat` hoặc `IndexHNSWFlat` để search
-> nhanh hơn (Flat index chỉ phù hợp tới vài trăm nghìn vector).
-
-## 4. Cấu trúc thư mục
+## 3. Cấu trúc thư mục
 
 ```
 config.py              # cấu hình trung tâm (path, tên model, tham số)
@@ -130,7 +77,7 @@ cache/                  # cache JSON: keyframe_meta, transcripts, captions, ocr
 index/                  # FAISS index đã build (.faiss + id_map.json)
 ```
 
-## 5. Troubleshooting thường gặp
+## 4. Troubleshooting thường gặp
 
 - **`RuntimeError: Chưa có index/image_index.faiss`** → chưa chạy `build_index.py`.
 - **`FlagEmbedding` cài lỗi** → cần `pip install -U FlagEmbedding`, đôi khi cần cài

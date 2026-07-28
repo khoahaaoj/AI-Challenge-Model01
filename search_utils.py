@@ -7,28 +7,25 @@ UI nằm ở app.py (Streamlit) và gọi vào các hàm ở đây.
 Luồng xử lý đầy đủ cho 1 câu query (tiếng Việt hoặc tiếng Anh) - xem full_search():
 
     query
-      ├─► CLIP text encoder  ─► search Image FAISS Index  ─► top 50 (theo NỘI DUNG ẢNH)
-      └─► BGE-M3 encoder     ─► search Text  FAISS Index  ─► top 50 (theo CAPTION/OCR/TRANSCRIPT)
+      ├─► [CLIP] Dịch Vi->En (Gemini) -> text encoder -> Image FAISS -> top 50 (nội dung ảnh)
+      └─► [BGE-M3] encoder -> Text FAISS -> top 50 (caption Qwen2-VL / OCR / transcript)
                     │
                     ▼
         Hybrid Fusion (RRF hoặc weighted sum) ─► top 50 hợp nhất (loại trùng theo keyframe)
                     │
                     ▼
-        CrossEncoder rerank (bge-reranker-v2-m3) ─► top 10 chính xác hơn
+        CrossEncoder rerank (bge-reranker-v2-m3) ─► top 10
+          (image-only candidates dùng caption cache làm fallback passage)
                     │
                     ▼
-        (tuỳ chọn) Gemini/VLM verify lại bằng ẢNH THẬT ─► sắp xếp lại top 10 theo độ tin cậy
+        (tuỳ chọn) Gemini verify lại bằng ẢNH THẬT ─► sắp xếp lại top 10
 
 Các model được load 1 LẦN DUY NHẤT (lazy singleton qua biến global) và tái sử dụng
 cho mọi query -> tránh phải load lại model (rất chậm) mỗi lần người dùng tìm kiếm.
+
+Ghi chú version (kiểm tra ngày 2026-07-28):
+  FlagEmbedding==1.4.0 + transformers==4.57.6 tương thích tốt, không cần patch.
 """
-import transformers.tokenization_utils_base
-
-if not hasattr(transformers.tokenization_utils_base.PreTrainedTokenizerBase, "prepare_for_model"):
-    def prepare_for_model(self, *args, **kwargs):
-        return self._encode_plus(*args, **kwargs)
-    transformers.tokenization_utils_base.PreTrainedTokenizerBase.prepare_for_model = prepare_for_model
-
 import os
 import json
 import numpy as np
@@ -53,6 +50,7 @@ _image_id_map = None
 _text_index = None
 _text_id_map = None
 _keyframe_meta = None
+_caption_cache = None   # cache caption dùng làm fallback passage cho CrossEncoder
 
 
 def _load_json(path):
@@ -97,7 +95,9 @@ def get_bge_model():
     global _bge_model
     if _bge_model is None:
         from FlagEmbedding import BGEM3FlagModel
-        _bge_model = BGEM3FlagModel(config.BGE_MODEL_NAME, use_fp16=(config.DEVICE == "cuda"))
+        # Chạy BGE-M3 trên CPU để tiết kiệm ~2.2GB VRAM cho GPU 4GB.
+        # Vì chỉ encode 1 câu query ngắn lúc search nên CPU xử lý cực nhanh (0.1s).
+        _bge_model = BGEM3FlagModel(config.BGE_MODEL_NAME, use_fp16=False, devices="cpu")
     return _bge_model
 
 
@@ -114,10 +114,98 @@ def get_reranker_model():
 def get_gemini_model():
     global _gemini_model
     if _gemini_model is None:
-        import google.generativeai as genai
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel(config.GEMINI_MODEL)
+        try:
+            # SDK mới (khuyến dùng từ 2025+)
+            from google import genai
+            _gemini_model = genai.Client(api_key=config.GEMINI_API_KEY)
+        except ImportError:
+            # Fallback SDK cũ nếu chưa được upgrade
+            import google.generativeai as genai  # noqa: deprecated
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            _gemini_model = genai.GenerativeModel(config.GEMINI_MODEL)
     return _gemini_model
+
+
+def _load_caption_cache():
+    """Load caption cache vào bộ nhớ (lazy, chỉ load 1 lần) để dùng làm fallback passage cho CrossEncoder."""
+    global _caption_cache
+    if _caption_cache is None:
+        if os.path.exists(config.CAPTION_CACHE):
+            _caption_cache = _load_json(config.CAPTION_CACHE)
+        else:
+            _caption_cache = {}
+    return _caption_cache
+
+
+def _get_passage_for_candidate(c):
+    """
+    Lấy passage (đoạn text đại diện) tốt nhất cho 1 candidate để đưa vào CrossEncoder.
+
+    Thứ tự ưu tiên:
+      1. matched_text (caption/ocr/transcript đã khớp từ nhánh BGE-M3) — tốt nhất
+      2. Caption của keyframe từ cache (fallback cho candidate image-only từ CLIP)
+      3. Chuỗi rỗng (CrossEncoder sẽ cho điểm thấp, nhưng không bị crash)
+
+    Lý do cần fallback: candidate chỉ đến từ nhánh CLIP (search_image) không có
+    matched_text. Nếu để chuỗi rỗng, CrossEncoder luôn cho điểm ~0 → candidate ảnh
+    luôn bị đẩy xuống cuối dù ảnh rất khớp với query → bug logic nghiêm trọng.
+    """
+    # Ưu tiên 1: matched_text từ nhánh text
+    text = (c.get("matched_text") or "").strip()
+    if text and text != "Khung hình video":
+        return text
+
+    # Ưu tiên 2: caption từ cache (fallback cho CLIP-only candidates)
+    caption_cache = _load_caption_cache()
+    path = c.get("path", "")
+    if path:
+        caption = (caption_cache.get(path) or "").strip()
+        if caption and caption != "Khung hình video":
+            return caption
+
+    # Fallback cuối: chuỗi rỗng
+    return ""
+
+
+def translate_query_for_clip(query):
+    """
+    Dịch query tiếng Việt sang tiếng Anh trước khi đưa vào CLIP text encoder.
+
+    CLIP ViT-B-32 (OpenAI) được train hoàn toàn bằng tiếng Anh. Nếu người dùng
+    gõ query tiếng Việt ("người đàn ông áo đỏ"), CLIP text encoder sẽ gần như
+    không hiểu → embedding sai → kết quả image search kém.
+
+    Giải pháp: dịch sang tiếng Anh trước ("a man in a red shirt") → CLIP hiểu tốt.
+    Dùng Gemini API (rất rẻ, ~0.00001$/call) hoặc bỏ qua nếu chưa cấu hình key.
+
+    Nếu query đã là tiếng Anh hoặc Gemini lỗi → trả về query gốc (graceful fallback).
+    """
+    if not config.GEMINI_API_KEY:
+        return query  # Chưa có key → dùng query gốc
+
+    # Heuristic: nếu query toàn ASCII thì có thể đã là tiếng Anh → không cần dịch
+    try:
+        if query.isascii():
+            return query
+    except Exception:
+        pass
+
+    try:
+        model = get_gemini_model()
+        prompt = (
+            f'Translate the following Vietnamese search query to English. '
+            f'Output ONLY the translated English text, nothing else.\n'
+            f'Query: "{query}"'
+        )
+        response = model.generate_content(prompt)
+        translated = (response.text or "").strip()
+        if translated:
+            print(f"[CLIP] Dịch query: '{query}' → '{translated}'")
+            return translated
+    except Exception as e:
+        print(f"[CLIP] Dịch query thất bại ({e}), dùng query gốc.")
+
+    return query
 
 
 # =================================================================
@@ -125,18 +213,22 @@ def get_gemini_model():
 # =================================================================
 def search_image(query, top_k=None):
     """
-    Encode câu query (vi/en) bằng CLIP text encoder rồi search Image FAISS Index.
+    Encode câu query bằng CLIP text encoder rồi search Image FAISS Index.
 
-    LƯU Ý QUAN TRỌNG: CLIP gốc (OpenAI) được train chủ yếu bằng dữ liệu tiếng Anh,
-    nên với query tiếng Việt, nhánh này thường kém chính xác hơn nhánh BGE-M3.
-    Đây chính là lý do pipeline luôn kết hợp (fusion) cả 2 nhánh thay vì chỉ dùng CLIP.
+    QUAN TRỌNG: CLIP ViT-B-32 chỉ hiểu tiếng Anh. Với query tiếng Việt,
+    hàm này sẽ tự động dịch sang tiếng Anh (nếu có GEMINI_API_KEY) trước
+    khi encode, giúp tăng độ chính xác nhánh image search đáng kể.
     """
     load_indices()
     top_k = top_k or config.TOP_K_RETRIEVE
     model, tokenizer = get_clip_model()
 
+    # Dịch query tiếng Việt sang tiếng Anh để CLIP text encoder hiểu đúng ngữ nghĩa.
+    # CLIP ViT-B-32 chỉ hiểu tiếng Anh → query tiếng Việt gốc sẽ cho embedding sai.
+    clip_query = translate_query_for_clip(query)
+
     with torch.no_grad():
-        tokens = tokenizer([query]).to(config.DEVICE)
+        tokens = tokenizer([clip_query]).to(config.DEVICE)
         feat = model.encode_text(tokens)
         feat = feat / feat.norm(dim=-1, keepdim=True)
         vec = feat.cpu().numpy().astype("float32")
@@ -324,7 +416,12 @@ def rerank(query, candidates, top_k=None):
         return []
 
     reranker = get_reranker_model()
-    pairs = [[query, c.get("matched_text", "") or ""] for c in candidates]
+    # FIX BUG: dùng _get_passage_for_candidate() thay vì c.get("matched_text", "") trực tiếp.
+    # Lý do: candidate chỉ từ nhánh CLIP (image-only) không có matched_text → nếu để ""
+    # CrossEncoder luôn cho điểm ~0 → kết quả CLIP bị đẩy xuống cuối dù ảnh rất khớp.
+    # _get_passage_for_candidate() tra caption cache làm fallback để CrossEncoder có
+    # đủ ngữ cảnh đánh giá candidate từ cả 2 nhánh một cách công bằng.
+    pairs = [[query, _get_passage_for_candidate(c)] for c in candidates]
     scores = reranker.compute_score(pairs, normalize=True)  # sigmoid-normalize về khoảng 0..1
 
     if isinstance(scores, float):  # chỉ có 1 candidate -> compute_score trả về số đơn thay vì list
@@ -354,20 +451,31 @@ def verify_with_gemini(query, candidates):
         return candidates
 
     model = get_gemini_model()
+    # Prompt có rubric rõ ràng + yêu cầu JSON → Gemini chấm điểm nhất quán hơn,
+    # dễ parse hơn cách extract digit thô bạo trước.
     prompt_template = (
-        "You are verifying video retrieval results for a video search engine.\n"
-        "Query (may be in Vietnamese or English): \"{query}\"\n"
-        "Does this image match the query? "
-        "Answer with ONLY a single integer from 0 to 10 (10 = perfect match, 0 = completely unrelated). "
-        "No explanation, just the number."
+        'You are scoring video keyframe retrieval results.\n'
+        'Query (Vietnamese or English): "{query}"\n'
+        'Rate how well this image matches the query using this rubric:\n'
+        '  9-10: Perfect match (correct objects AND correct action/scene)\n'
+        '  6-8:  Partial match (correct objects, wrong action OR context)\n'
+        '  3-5:  Weak match (related topic but different content)\n'
+        '  0-2:  No match (completely unrelated)\n'
+        'Respond with ONLY valid JSON, no markdown: {{"score": <0-10>}}'
     )
 
     for c in candidates:
         try:
             image = Image.open(c["path"]).convert("RGB")
             response = model.generate_content([prompt_template.format(query=query), image])
-            digits = "".join(ch for ch in (response.text or "") if ch.isdigit())
-            score = int(digits) if digits else 0
+            raw = (response.text or "").strip()
+            # Ưu tiên parse JSON {"score": X}; fallback extract digit nếu format lệch
+            try:
+                import json as _json
+                score = int(_json.loads(raw).get("score", 0))
+            except Exception:
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                score = int(digits[:2]) if digits else 0  # lấy tối đa 2 digit (0-10)
             c["verify_score"] = max(0, min(10, score))
         except Exception as e:
             print(f"[LỖI] Gemini verify lỗi ở {c['path']}: {e}")

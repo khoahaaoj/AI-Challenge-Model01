@@ -1,1 +1,22 @@
-data/videos/
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.idea/
+.vscode/
+
+# Project Data and Cache (QUAN TRỌNG: Không đẩy data & index lên Github)
+data/
+cache/
+index/
+
+# API keys and configs
+.env

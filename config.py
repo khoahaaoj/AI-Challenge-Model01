@@ -11,6 +11,8 @@ Mọi file khác (extract_keyframes.py, build_index.py, search_utils.py, app.py)
 
 import os
 import torch
+from dotenv import load_dotenv
+load_dotenv()  # Tự động đọc các biến trong file .env
 
 # =================================================================
 # THIẾT BỊ (GPU nếu có, không thì fallback CPU)
@@ -34,7 +36,7 @@ for _d in [VIDEO_DIR, KEYFRAME_DIR, CACHE_DIR, INDEX_DIR]:
 # ---- Các file cache cụ thể ----
 KEYFRAME_META_CACHE = os.path.join(CACHE_DIR, "keyframe_meta.json")  # metadata keyframe: video_id, frame_idx, timestamp, path
 TRANSCRIPT_CACHE = os.path.join(CACHE_DIR, "transcripts.json")       # transcript Whisper theo từng video
-CAPTION_CACHE = os.path.join(CACHE_DIR, "captions.json")             # caption Gemini theo từng ảnh keyframe (key = path ảnh)
+CAPTION_CACHE = os.path.join(CACHE_DIR, "captions.json")             # caption Qwen2-VL theo từng ảnh keyframe (key = path ảnh)
 OCR_CACHE = os.path.join(CACHE_DIR, "ocr.json")                      # text OCR theo từng ảnh keyframe (key = path ảnh)
 
 # ---- Các file FAISS index ----
@@ -46,8 +48,13 @@ TEXT_ID_MAP_PATH = os.path.join(INDEX_DIR, "text_id_map.json")       # vị trí
 # =================================================================
 # BƯỚC TÁCH CẢNH (PySceneDetect)
 # =================================================================
-SCENE_THRESHOLD = 27.0   # ngưỡng đổi cảnh của ContentDetector, 27 là giá trị mặc định khá cân bằng
+SCENE_THRESHOLD = 27.0   # ngưỡng đổi cảnh của ContentDetector
 MIN_SCENE_LEN = 15       # số frame tối thiểu của 1 cảnh (tránh tách quá vụn)
+
+# Vị trí lấy keyframe trong mỗi scene (theo tỷ lệ % độ dài scene).
+# [0.25, 0.5, 0.75] = 3 frame/scene (đầu, giữa, cuối) -> tăng recall ~3x.
+# Đổi về [0.5] để quay lại chế độ 1 frame/scene nếu cần tiết kiệm thời gian build.
+KEYFRAME_POSITIONS = [0.25, 0.5, 0.75]
 
 # =================================================================
 # WHISPER (Speech-to-Text, đa ngôn ngữ - hỗ trợ tiếng Việt)
@@ -68,6 +75,9 @@ WHISPER_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 # ở NHÁNH NÀY, đó là lý do pipeline có thêm nhánh BGE-M3 (đa ngôn ngữ) để bù lại.
 CLIP_MODEL_NAME = "ViT-B-32"
 CLIP_PRETRAINED = "openai"
+# Batch size khi encode ảnh bằng CLIP (build_index.py).
+# 16 = an toàn với 4GB VRAM. Tăng lên 32/64 nếu VRAM lớn hơn để nhanh hơn.
+CLIP_BATCH_SIZE = 16
 
 # =================================================================
 # BGE-M3 (Text embedding đa ngôn ngữ - hỗ trợ tốt cả vi & en)
