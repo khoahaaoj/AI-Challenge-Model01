@@ -1,57 +1,159 @@
 """
 app.py
 =======
-Giao diện Streamlit cho hệ thống multimedia retrieval.
-File này CHỈ lo phần hiển thị (UI), toàn bộ logic tìm kiếm nằm ở search_utils.py.
+Giao diện Streamlit cho AIC 2026 Multimedia Retrieval.
 
-Cách chạy (SAU KHI đã chạy extract_keyframes.py và build_index.py):
-    streamlit run app.py
+Tính năng:
+  - Tìm kiếm 3 nhánh: SigLIP2 (ảnh) + BGE-M3 (text dense) + BM25 (keyword)
+  - Hybrid RRF Fusion → CrossEncoder rerank → (tuỳ chọn) Gemini VLM verify
+  - Xem video tại timestamp ±2s ngay trong giao diện
+  - Chọn keyframe và export JSON/CSV theo format nộp bài AIC
 """
-
+import os
+import json
 import streamlit as st
 from PIL import Image
 
 import config
 import search_utils
 
-st.set_page_config(page_title="AIC 2026 - Multimedia Retrieval", layout="wide")
+st.set_page_config(
+    page_title="AIC 2026 — Video Retrieval",
+    page_icon="🔍",
+    layout="wide",
+)
 
-st.title("🔍 AI Challenge HCMC 2026 — Multimedia Retrieval")
-st.caption("Nhập truy vấn bằng tiếng Việt hoặc tiếng Anh để tìm keyframe/video khớp nhất.")
 
-# ---------------- SIDEBAR: các tuỳ chọn tìm kiếm ----------------
+# =================================================================
+# TIỆN ÍCH
+# =================================================================
+def find_video_path(video_id: str) -> str | None:
+    """Tìm file video gốc từ video_id (thử lần lượt các extension phổ biến)."""
+    for ext in (".mp4", ".avi", ".mkv", ".mov", ".webm"):
+        p = os.path.join(config.VIDEO_DIR, video_id + ext)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def to_submission_record(item: dict) -> dict:
+    """Chuyển 1 kết quả sang format nộp bài AIC: video_id + frame_idx + timestamp."""
+    return {
+        "video_id":      item["video_id"],
+        "frame_idx":     item["frame_idx"],
+        "timestamp_sec": round(item["timestamp_sec"], 2),
+        "keyframe_path": item.get("path", ""),
+    }
+
+
+# =================================================================
+# SESSION STATE INIT
+# =================================================================
+if "selected" not in st.session_state:
+    # dict[(video_id, frame_idx)] -> item — giữ danh sách keyframe đã chọn để nộp
+    st.session_state.selected = {}
+if "last_results" not in st.session_state:
+    st.session_state.last_results = []
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+
+
+# =================================================================
+# HEADER
+# =================================================================
+st.title("🔍 AIC 2026 — Multimedia Video Retrieval")
+st.caption(
+    "SigLIP2 (ảnh) · BGE-M3 dense (text) · BM25 sparse (keyword) "
+    "→ RRF Fusion → CrossEncoder Rerank → Gemini Verify"
+)
+
+
+# =================================================================
+# SIDEBAR — Cài đặt + Submit panel
+# =================================================================
 with st.sidebar:
     st.header("⚙️ Cài đặt tìm kiếm")
     fusion_method = st.radio(
-        "Phương pháp hybrid fusion",
+        "Hybrid fusion",
         ["rrf", "weighted"],
         index=0,
-        help="RRF (Reciprocal Rank Fusion): kết hợp theo THỨ HẠNG, ổn định hơn. "
-             "Weighted: cộng điểm có trọng số sau khi chuẩn hóa min-max.",
+        help="RRF: kết hợp theo thứ hạng (khuyến nghị). Weighted: cộng điểm có trọng số.",
     )
     do_verify = st.checkbox(
-        "Xác thực lại bằng Gemini (VLM)",
+        "Gemini VLM verify",
         value=False,
-        help="Gửi ảnh + query cho Gemini chấm điểm 0-10 để lọc kết quả sai. "
-             "Chính xác hơn nhưng CHẬM hơn và tốn API call.",
+        help="Gửi ảnh thật cho Gemini chấm điểm 0-10. Chính xác hơn nhưng chậm hơn.",
     )
-    top_k_display = st.slider("Số kết quả hiển thị", 1, 10, 10)
+    cols_per_row = st.slider("Cột hiển thị", 2, 5, 3)
+    top_k_display = st.slider("Số kết quả", 1, 10, 10)
 
     st.divider()
-    st.caption(
-        "Pipeline: CLIP (ảnh) + BGE-M3 (caption/OCR/transcript) "
-        "→ hybrid fusion → CrossEncoder rerank → (tuỳ chọn) Gemini verify"
+
+    # ---- Panel nộp bài ----
+    n_selected = len(st.session_state.selected)
+    st.subheader(f"📤 Nộp bài ({n_selected} đã chọn)")
+
+    if n_selected == 0:
+        st.caption("Tick ✅ vào keyframe đúng bên dưới để thêm vào danh sách nộp.")
+    else:
+        records = [to_submission_record(v) for v in st.session_state.selected.values()]
+
+        # Hiển thị preview danh sách đã chọn
+        with st.expander("Xem danh sách đã chọn", expanded=False):
+            for r in records:
+                st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}` · `{r['timestamp_sec']}s`")
+
+        st.download_button(
+            label="⬇️ Tải JSON (AIC format)",
+            data=json.dumps(records, ensure_ascii=False, indent=2),
+            file_name="aic_submission.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        st.download_button(
+            label="⬇️ Tải CSV",
+            data="\n".join(
+                ["video_id,frame_idx,timestamp_sec,keyframe_path"]
+                + [
+                    f"{r['video_id']},{r['frame_idx']},{r['timestamp_sec']},{r['keyframe_path']}"
+                    for r in records
+                ]
+            ),
+            file_name="aic_submission.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        if st.button("🗑️ Xóa tất cả đã chọn", use_container_width=True):
+            st.session_state.selected = {}
+            st.rerun()
+
+    st.divider()
+    with st.expander("ℹ️ Hướng dẫn build index"):
+        st.code(
+            "python extract_keyframes.py\npython build_index.py\nstreamlit run app.py",
+            language="bash",
+        )
+
+
+# =================================================================
+# SEARCH BAR
+# =================================================================
+col_q, col_btn = st.columns([5, 1])
+with col_q:
+    query = st.text_input(
+        "Truy vấn:",
+        placeholder="VD: người đàn ông mặc áo đỏ đang lái xe máy trên đường phố...",
+        label_visibility="collapsed",
     )
+with col_btn:
+    search_clicked = st.button("🔎 Tìm", type="primary", use_container_width=True)
 
-# ---------------- Ô NHẬP QUERY ----------------
-query = st.text_input(
-    "Nhập truy vấn:",
-    placeholder="VD: người đàn ông mặc áo đỏ đang lái xe máy trên đường phố...",
-)
-search_clicked = st.button("🔎 Tìm kiếm", type="primary")
 
+# =================================================================
+# SEARCH LOGIC
+# =================================================================
 if search_clicked and query.strip():
-    with st.spinner("Đang tìm kiếm..."):
+    with st.spinner("Đang tìm kiếm (SigLIP2 + BGE-M3 + BM25 → fusion → rerank)..."):
         try:
             fused, reranked, verified = search_utils.full_search(
                 query, fusion_method=fusion_method, do_verify=do_verify
@@ -60,46 +162,85 @@ if search_clicked and query.strip():
             st.error(str(e))
             st.stop()
 
-    final_results = (verified if verified is not None else reranked)[:top_k_display]
-
-    st.subheader(f'Kết quả cho: "{query}"')
-    if not final_results:
-        st.warning(
-            "Không tìm thấy kết quả nào. Kiểm tra lại đã chạy build_index.py "
-            "và thư mục data/videos/ có video chưa."
-        )
-
-    # Hiển thị dạng lưới ảnh, mỗi hàng 5 kết quả
-    cols_per_row = 5
-    for row_start in range(0, len(final_results), cols_per_row):
-        row_items = final_results[row_start:row_start + cols_per_row]
-        cols = st.columns(len(row_items))
-        for col, item in zip(cols, row_items):
-            with col:
-                try:
-                    st.image(Image.open(item["path"]), use_container_width=True)
-                except Exception:
-                    st.write("⚠️ Không tải được ảnh")
-
-                st.markdown(f"**Video:** `{item['video_id']}`")
-                st.markdown(f"**Thời điểm:** {item['timestamp_sec']}s")
-                if item.get("verify_score") is not None:
-                    st.markdown(f"**Điểm Gemini:** {item['verify_score']}/10")
-                st.markdown(f"**Điểm rerank:** {item.get('rerank_score', 0):.3f}")
-                if item.get("matched_text"):
-                    with st.expander("Text khớp"):
-                        st.write(f"({item.get('text_source', '')}) {item['matched_text']}")
+    st.session_state.last_results = (
+        (verified if verified is not None else reranked)[:top_k_display]
+    )
+    st.session_state.last_query = query
 
 elif search_clicked:
     st.warning("Vui lòng nhập truy vấn trước khi tìm kiếm.")
 
-with st.expander("ℹ️ Hướng dẫn build index trước khi dùng"):
-    st.markdown(
-        """
-        1. Copy video vào thư mục `data/videos/`
-        2. Chạy `python extract_keyframes.py` → tách keyframe + transcript
-        3. (Tuỳ chọn) đặt biến môi trường `GEMINI_API_KEY` để bật caption + verify
-        4. Chạy `python build_index.py` → build FAISS index (ảnh + text)
-        5. Chạy `streamlit run app.py` → tìm kiếm tại đây
-        """
-    )
+
+# =================================================================
+# HIỂN THỊ KẾT QUẢ
+# =================================================================
+results = st.session_state.last_results
+if results:
+    q_display = st.session_state.last_query
+    st.subheader(f'Kết quả cho: "{q_display}" — {len(results)} keyframe')
+    st.divider()
+
+    for row_start in range(0, len(results), cols_per_row):
+        row_items = results[row_start : row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+
+        for col, item in zip(cols, row_items):
+            sel_key = (item["video_id"], item["frame_idx"])
+            is_selected = sel_key in st.session_state.selected
+
+            with col:
+                # ---- Ảnh keyframe ----
+                try:
+                    img = Image.open(item["path"]).convert("RGB")
+                    st.image(img, use_container_width=True)
+                except Exception:
+                    st.warning("⚠️ Không tải được ảnh")
+
+                # ---- Metadata chính ----
+                st.markdown(
+                    f"**`{item['video_id']}`**  \n"
+                    f"⏱ `{item['timestamp_sec']:.1f}s` · Frame `{item['frame_idx']}`"
+                )
+
+                # ---- Điểm số ----
+                badges = []
+                if item.get("verify_score") is not None:
+                    badges.append(f"🎯 Gemini `{item['verify_score']}/10`")
+                badges.append(f"📊 Rerank `{item.get('rerank_score', 0):.3f}`")
+                if item.get("fused_score") is not None:
+                    badges.append(f"🔀 RRF `{item['fused_score']:.4f}`")
+                st.caption("  ·  ".join(badges))
+
+                # ---- Text khớp (nếu có) ----
+                if item.get("matched_text"):
+                    src = item.get("text_source", "")
+                    icon = {"caption": "💬", "ocr": "🔤", "transcript": "🎙️"}.get(src, "📝")
+                    with st.expander(f"{icon} Text ({src})"):
+                        st.write(item["matched_text"])
+
+                # ---- Video player ----
+                video_path = find_video_path(item["video_id"])
+                if video_path:
+                    with st.expander("▶️ Xem video tại timestamp"):
+                        # Phát từ 2 giây trước keyframe để thấy context
+                        start_sec = max(0, int(item["timestamp_sec"]) - 2)
+                        st.video(video_path, start_time=start_sec)
+                        st.caption(
+                            f"Phát từ `{start_sec}s` "
+                            f"(keyframe tại `{item['timestamp_sec']:.1f}s`)"
+                        )
+                else:
+                    st.caption("_(Không tìm thấy file video gốc trong data/videos/)_")
+
+                # ---- Checkbox chọn để nộp bài ----
+                checked = st.checkbox(
+                    "✅ Chọn để nộp",
+                    value=is_selected,
+                    key=f"chk_{item['video_id']}_{item['frame_idx']}",
+                )
+                if checked:
+                    st.session_state.selected[sel_key] = item
+                elif sel_key in st.session_state.selected:
+                    del st.session_state.selected[sel_key]
+
+                st.markdown("---")

@@ -35,7 +35,11 @@ google-generativeai
 # ==== UI ====
 streamlit
 
+# ==== BM25 sparse retrieval ====
+rank-bm25
+
 # ==== Tiện ích ====
 Pillow
 numpy
 tqdm
+python-dotenv
