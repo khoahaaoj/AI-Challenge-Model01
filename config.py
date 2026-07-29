@@ -44,6 +44,7 @@ IMAGE_INDEX_PATH = os.path.join(INDEX_DIR, "image_index.faiss")
 IMAGE_ID_MAP_PATH = os.path.join(INDEX_DIR, "image_id_map.json")     # vị trí trong FAISS -> metadata keyframe
 TEXT_INDEX_PATH = os.path.join(INDEX_DIR, "text_index.faiss")
 TEXT_ID_MAP_PATH = os.path.join(INDEX_DIR, "text_id_map.json")       # vị trí trong FAISS -> record text (caption/ocr/transcript)
+BM25_INDEX_PATH  = os.path.join(INDEX_DIR, "bm25_index.pkl")          # BM25 sparse index (pickle, không cần GPU)
 
 # =================================================================
 # BƯỚC TÁCH CẢNH (PySceneDetect)
@@ -68,15 +69,17 @@ WHISPER_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 # =================================================================
 # CLIP (Image encoder - nhánh tìm theo nội dung hình ảnh)
 # =================================================================
-# open_clip: ViT-B-32 bản gốc OpenAI - nhẹ, chạy nhanh, đủ tốt để bắt đầu.
-# Nếu cần độ chính xác cao hơn (và có GPU khỏe), có thể nâng cấp lên:
-#   CLIP_MODEL_NAME = "ViT-L-14", CLIP_PRETRAINED = "openai"
-# Lưu ý: CLIP gốc train chủ yếu bằng tiếng Anh -> query tiếng Việt sẽ kém chính xác hơn
-# ở NHÁNH NÀY, đó là lý do pipeline có thêm nhánh BGE-M3 (đa ngôn ngữ) để bù lại.
-CLIP_MODEL_NAME = "ViT-B-32"
-CLIP_PRETRAINED = "openai"
-# Batch size khi encode ảnh bằng CLIP (build_index.py).
-# 16 = an toàn với 4GB VRAM. Tăng lên 32/64 nếu VRAM lớn hơn để nhanh hơn.
+# Nâng cấp lên SigLIP2 ViT-B-16 (Google, 2024):
+#   - Accuracy zero-shot cao hơn ~10% so với ViT-B-32 OpenAI
+#   - Training objective tốt hơn (sigmoid loss thay vì softmax contrastive)
+#   - VRAM tương đương (~400MB), an toàn với 4GB
+#   - Load qua hf-hub, cần open_clip_torch >= 2.31.0
+# Lưu ý: SigLIP2 vẫn train chủ yếu tiếng Anh -> vẫn cần dịch query Vi->En
+# trước khi encode (xem translate_query_for_clip trong search_utils.py).
+# ⚠️  IMAGE INDEX PHẢI BUILD LẠI khi đổi model (dim thay đổi: 512 -> 768).
+CLIP_MODEL_NAME = "hf-hub:timm/ViT-B-16-SigLIP2"
+CLIP_PRETRAINED = None  # không cần khi load từ hf-hub
+# Batch size khi encode ảnh (build_index.py). 16 an toàn với 4GB VRAM.
 CLIP_BATCH_SIZE = 16
 
 # =================================================================

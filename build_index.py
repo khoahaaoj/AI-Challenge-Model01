@@ -75,10 +75,10 @@ def build_image_index(keyframe_meta):
 
     import open_clip
 
-    print(f"[CLIP] Đang tải model {config.CLIP_MODEL_NAME} ({config.CLIP_PRETRAINED})...")
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        config.CLIP_MODEL_NAME, pretrained=config.CLIP_PRETRAINED
-    )
+    print(f"[CLIP] Đang tải model SigLIP2: {config.CLIP_MODEL_NAME}...")
+    # SigLIP2 load qua hf-hub: dùng create_model_from_pretrained (trả về 2-tuple)
+    # thay vì create_model_and_transforms (3-tuple) của CLIP cũ.
+    model, preprocess = open_clip.create_model_from_pretrained(config.CLIP_MODEL_NAME)
     model = model.to(config.DEVICE).eval()
 
     flat_keyframes = flatten_keyframes(keyframe_meta)
@@ -368,6 +368,54 @@ def build_text_index(keyframe_meta, transcript_cache):
 
 
 # =================================================================
+# 5) BM25 SPARSE INDEX (keyword exact match)
+# =================================================================
+def build_bm25_index(records):
+    """
+    Build BM25 sparse index từ cùng text records (caption + ocr + transcript).
+
+    BM25 bổ sung điểm mạnh mà dense vector (BGE-M3) yếu:
+    exact keyword match — tên người, địa danh, thương hiệu, số liệu.
+    Không cần GPU, không tốn VRAM, build cực nhanh (<5s).
+
+    Tokenizer:
+      - Nếu đã cài underthesea: tách từ tiếng Việt chính xác hơn
+        (pip install underthesea). Tốt hơn với query ghép từ như "thủ tướng chính phủ".
+      - Fallback về str.split(): vẫn tốt với tên riêng và keyword ngắn.
+    """
+    import pickle
+    from rank_bm25 import BM25Okapi
+
+    if os.path.exists(config.BM25_INDEX_PATH):
+        print("[BM25] Đã có index → bỏ qua. (Xóa index/bm25_index.pkl để build lại)")
+        return
+
+    if not records:
+        print("[BM25] Không có records → bỏ qua.")
+        return
+
+    # Chọn tokenizer: underthesea nếu có, fallback simple split
+    try:
+        from underthesea import word_tokenize
+        def _tokenize(text):
+            return word_tokenize(text.lower(), format="text").split()
+        print("[BM25] Dùng underthesea word_tokenize (tiếng Việt tốt hơn).")
+    except ImportError:
+        def _tokenize(text):
+            return text.lower().split()
+        print("[BM25] Dùng str.split() (cài underthesea để cải thiện tiếng Việt).")
+
+    print(f"[BM25] Tokenize và build index từ {len(records)} records...")
+    tokenized_corpus = [_tokenize(r["text"]) for r in records]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    with open(config.BM25_INDEX_PATH, "wb") as f:
+        pickle.dump({"bm25": bm25, "records": records}, f)
+
+    print(f"[BM25] ✅ Đã build BM25 index với {len(records)} records.")
+
+
+# =================================================================
 # MAIN
 # =================================================================
 if __name__ == "__main__":
@@ -379,9 +427,11 @@ if __name__ == "__main__":
             "Chưa có cache/keyframe_meta.json. Hãy chạy `python extract_keyframes.py` trước!"
         )
 
-    build_image_index(keyframe_meta)                    # 1. CLIP -> FAISS image index
-    build_captions(keyframe_meta)                        # 2. Gemini caption (cần GEMINI_API_KEY)
-    build_ocr(keyframe_meta)                              # 3. EasyOCR
-    build_text_index(keyframe_meta, transcript_cache)     # 4. BGE-M3 -> FAISS text index
+    build_image_index(keyframe_meta)                      # 1. SigLIP2 -> FAISS image index
+    build_captions(keyframe_meta)                          # 2. Qwen2-VL caption
+    build_ocr(keyframe_meta)                               # 3. EasyOCR
+    build_text_index(keyframe_meta, transcript_cache)      # 4. BGE-M3 -> FAISS text index
+    records = build_text_records(keyframe_meta, transcript_cache)  # tái dùng records đã có
+    build_bm25_index(records)                              # 5. BM25 sparse index
 
     print("\n✅ Hoàn tất bước 2. Chạy `streamlit run app.py` để bắt đầu tìm kiếm.")

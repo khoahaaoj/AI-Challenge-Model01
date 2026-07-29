@@ -41,9 +41,11 @@ import config
 # =================================================================
 _clip_model = None
 _clip_tokenizer = None
+_clip_preprocess = None  # SigLIP2: lưu preprocess để dùng lại khi encode ảnh (verify)
 _bge_model = None
 _reranker_model = None
 _gemini_model = None
+_bm25_data = None        # BM25 sparse index (lazy load từ pickle)
 
 _image_index = None
 _image_id_map = None
@@ -79,14 +81,15 @@ def load_indices():
 
 
 def get_clip_model():
-    """Load CLIP model + tokenizer (dùng để encode cả ảnh lúc build lẫn text query lúc search)."""
-    global _clip_model, _clip_tokenizer
+    """Load SigLIP2 model + tokenizer qua hf-hub (open_clip >= 2.31.0)."""
+    global _clip_model, _clip_tokenizer, _clip_preprocess
     if _clip_model is None:
         import open_clip
-        model, _, _ = open_clip.create_model_and_transforms(
-            config.CLIP_MODEL_NAME, pretrained=config.CLIP_PRETRAINED
-        )
+        # SigLIP2 dùng create_model_from_pretrained (trả về 2-tuple: model, preprocess)
+        # thay vì create_model_and_transforms (3-tuple) của CLIP OpenAI cũ.
+        model, preprocess = open_clip.create_model_from_pretrained(config.CLIP_MODEL_NAME)
         _clip_model = model.to(config.DEVICE).eval()
+        _clip_preprocess = preprocess
         _clip_tokenizer = open_clip.get_tokenizer(config.CLIP_MODEL_NAME)
     return _clip_model, _clip_tokenizer
 
@@ -317,19 +320,85 @@ def search_text(query, top_k=None):
 
 
 # =================================================================
-# 3) HYBRID FUSION: gộp 2 danh sách (image + text) thành 1 danh sách duy nhất
+# 3) SEARCH BM25: sparse keyword retrieval (bổ sung exact match)
+# =================================================================
+def get_bm25():
+    """Lazy-load BM25 index từ pickle (chỉ load 1 lần, CPU-only)."""
+    global _bm25_data
+    if _bm25_data is None:
+        import pickle
+        if os.path.exists(config.BM25_INDEX_PATH):
+            with open(config.BM25_INDEX_PATH, "rb") as f:
+                _bm25_data = pickle.load(f)
+    return _bm25_data
+
+
+def search_bm25(query, top_k=None):
+    """
+    Tìm kiếm bằng BM25 Okapi trên corpus caption + OCR + transcript.
+    Chạy hoàn toàn trên CPU, không cần VRAM.
+
+    Mạnh hơn BGE-M3 với: tên riêng, tên địa danh, tên thương hiệu,
+    số hiệu văn bản, thưật ngữ chuyên ngành xuất hiện nguyên vẹn.
+    Bổ sung vào RRF fusion như nhánh thứ 3 độc lập.
+    """
+    top_k = top_k or config.TOP_K_RETRIEVE
+    data = get_bm25()
+    if data is None:
+        return []  # Chưa build BM25 index -> bỏ qua, không lỗi
+
+    bm25, records = data["bm25"], data["records"]
+
+    # Dùng cùng tokenizer logic với lúc build (simple split đủ cho query ngắn)
+    tokens = query.lower().split()
+    scores = bm25.get_scores(tokens)
+    top_idxs = scores.argsort()[::-1][:top_k]
+
+    results = []
+    for idx in top_idxs:
+        if scores[idx] <= 0:
+            break  # Chỉ giữ kết quả có score thực sự (>0)
+        r = records[int(idx)]
+        frame_idx = r["frame_idx"]
+
+        if frame_idx is None:
+            nearest = _nearest_keyframe(r["video_id"], r["timestamp_sec"])
+            if nearest is None:
+                continue
+            frame_idx = nearest["frame_idx"]
+            path = nearest["path"]
+        else:
+            path = os.path.join(config.KEYFRAME_DIR, r["video_id"], f"{frame_idx:08d}.jpg")
+
+        results.append({
+            "video_id": r["video_id"],
+            "frame_idx": frame_idx,
+            "timestamp_sec": r["timestamp_sec"],
+            "path": path,
+            "score": float(scores[idx]),
+            "matched_text": r["text"],
+            "text_source": r["source"],
+        })
+    return results
+
+
+# =================================================================
+# 4) HYBRID FUSION: gộp 3 danh sách (image + dense text + BM25) thành 1
 # =================================================================
 def _key(item):
     """Khóa định danh 1 keyframe duy nhất, dùng để gộp kết quả trùng nhau giữa 2 nhánh."""
     return (item["video_id"], item["frame_idx"])
 
 
-def fuse_rrf(image_results, text_results, k=None, top_k=None):
+def fuse_rrf(image_results, text_results, bm25_results=None, k=None, top_k=None):
     """
-    Reciprocal Rank Fusion (RRF): score(item) = Σ 1 / (k + rank_trong_từng_danh_sách).
-    Ưu điểm: chỉ dựa vào THỨ HẠNG (rank), không quan tâm thang điểm gốc -> rất phù hợp
-    để kết hợp 2 nguồn điểm số vốn không cùng bản chất như cosine-CLIP và cosine-BGE-M3
-    (2 model khác nhau, phân bố điểm số khác nhau, so trực tiếp giá trị số là không hợp lý).
+    Reciprocal Rank Fusion (RRF) cho 3 nhánh: CLIP (image) + BGE-M3 (dense) + BM25 (sparse).
+
+    score(item) = Σ w_source / (k + rank_trong_source)
+
+    RRF chỉ dựa vào THỨ HẠNG, không quan tâm thầng điểm gốc → phù hợp
+    để kết hợp các nguồn điểm không cùng bản chất (cosine-CLIP vs cosine-BGE vs BM25).
+    bm25_results=None: tương thích ngược (chưa build BM25 index -> vẫn chạy 2 nhánh cũ).
     """
     k = k or config.RRF_K
     top_k = top_k or config.TOP_K_RETRIEVE
@@ -345,7 +414,14 @@ def fuse_rrf(image_results, text_results, k=None, top_k=None):
     for rank, item in enumerate(text_results):
         key = _key(item)
         rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
-        # Ưu tiên giữ bản ghi có "matched_text" (cần cho bước rerank sau) khi item đã tồn tại
+        # Ưu tiên giữ bản ghi có "matched_text" (cần cho bước rerank sau)
+        if key not in item_cache or "matched_text" not in item_cache[key]:
+            item_cache[key] = item
+
+    # Nhánh BM25 (sparse) — boost kết quả khớp keyword chính xác
+    for rank, item in enumerate(bm25_results or []):
+        key = _key(item)
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
 
@@ -494,21 +570,28 @@ def verify_with_gemini(query, candidates):
 # =================================================================
 def full_search(query, fusion_method=None, do_verify=False):
     """
-    Chạy toàn bộ luồng: search_image + search_text -> fusion -> rerank -> (tuỳ chọn) verify.
+    Chạy toàn bộ luồng: search_image + search_text + search_bm25
+    -> fusion -> rerank -> (tuỳ chọn) verify.
 
     Trả về tuple:
-        fused     : top 50 sau khi hợp nhất 2 nhánh (chưa rerank)
+        fused     : top 50 sau khi hợp nhất 3 nhánh (chưa rerank)
         reranked  : top 10 sau CrossEncoder rerank
         verified  : top 10 sau Gemini verify (None nếu do_verify=False)
     """
     fusion_method = fusion_method or config.FUSION_METHOD
 
     image_results = search_image(query, top_k=config.TOP_K_RETRIEVE)
-    text_results = search_text(query, top_k=config.TOP_K_RETRIEVE)
+    text_results  = search_text(query,  top_k=config.TOP_K_RETRIEVE)
+    bm25_results  = search_bm25(query,  top_k=config.TOP_K_RETRIEVE)  # [] nếu chưa build
 
     if fusion_method == "rrf":
-        fused = fuse_rrf(image_results, text_results, top_k=config.TOP_K_RETRIEVE)
+        fused = fuse_rrf(
+            image_results, text_results,
+            bm25_results=bm25_results,
+            top_k=config.TOP_K_RETRIEVE,
+        )
     else:
+        # weighted fusion không hỗ trợ BM25 (thước đo BM25 khác bản chất); dùng RRF nếu cần BM25
         fused = fuse_weighted(image_results, text_results, top_k=config.TOP_K_RETRIEVE)
 
     reranked = rerank(query, fused, top_k=config.TOP_K_RERANK)
