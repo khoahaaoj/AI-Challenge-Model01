@@ -28,8 +28,27 @@ import faiss
 import torch
 from PIL import Image
 
+# Fix AttributeError: type object 'tqdm' has no attribute '_lock' khi HuggingFace snapshot_download chạy trong Streamlit thread
+try:
+    import tqdm
+    import tqdm.contrib.concurrent as _tqdm_concurrent
+    from contextlib import contextmanager
+
+    _orig_ensure_lock = _tqdm_concurrent.ensure_lock
+    @contextmanager
+    def _safe_ensure_lock(*args, **kwargs):
+        try:
+            with _orig_ensure_lock(*args, **kwargs) as lk:
+                yield lk
+        except AttributeError:
+            yield None
+    _tqdm_concurrent.ensure_lock = _safe_ensure_lock
+except Exception:
+    pass
+
 import config
 from tokenizer_utils import detect_language, get_tokenizer
+
 
 
 # =================================================================
@@ -434,7 +453,8 @@ def fuse_rrf(image_results, text_results, bm25_results=None, k=None, top_k=None)
 
     for rank, item in enumerate(image_results):
         key = _key(item)
-        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        # Trọng số x3 cho Image để tránh bị OCR đè bẹp
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 3.0 / (k + rank + 1)
         item_cache.setdefault(key, item)
 
     for rank, item in enumerate(text_results):
@@ -445,7 +465,8 @@ def fuse_rrf(image_results, text_results, bm25_results=None, k=None, top_k=None)
 
     for rank, item in enumerate(bm25_results or []):
         key = _key(item)
-        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        # Trọng số x0.5 cho BM25 vì hay bị dính từ khóa nhiễu trong OCR/News Ticker
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 0.5 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
 
@@ -512,8 +533,10 @@ def rerank(query, candidates, top_k=None):
 
     for c, s in zip(candidates, scores):
         c["rerank_score"] = float(s)
+        # Kết hợp điểm RRF (visual) và Reranker (text) để không loại bỏ ảnh thuần túy
+        c["final_score"] = c.get("fused_score", 0.0) + float(s) * 0.5
 
-    return sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)[:top_k]
+    return sorted(candidates, key=lambda c: c["final_score"], reverse=True)[:top_k]
 
 
 # =================================================================
@@ -559,8 +582,8 @@ def verify_with_gemini(query, candidates):
             c["verify_score"] = None
 
     def sort_key(c):
-        has_verify = c["verify_score"] is not None
-        return (has_verify, c["verify_score"] if has_verify else 0, c["rerank_score"])
+        has_verify = c.get("verify_score") is not None
+        return (has_verify, c.get("verify_score") if has_verify else 0, c.get("final_score", c.get("fused_score", 0)))
 
     return sorted(candidates, key=sort_key, reverse=True)
 

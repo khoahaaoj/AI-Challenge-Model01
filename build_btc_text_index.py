@@ -99,6 +99,44 @@ def build_btc_text_records():
     else:
         print("  - Không tìm thấy thư mục objects hoặc btc_keyframe_meta.json")
 
+    # 3. Load OCR (Frame-level)
+    if os.path.exists(config.OCR_CACHE):
+        ocr_data = load_json(config.OCR_CACHE)
+        ocr_count = 0
+        for path, text in ocr_data.items():
+            text = text.strip()
+            if not text:
+                continue
+            
+            # path: .../data/keyframes/L10_V010/001.jpg
+            try:
+                filename = os.path.basename(path)
+                video_id = os.path.basename(os.path.dirname(path))
+                frame_idx_str = filename.split(".")[0]
+                frame_idx = int(frame_idx_str)
+                
+                # Cần timestamp_sec. Lấy từ kf_map nếu có
+                timestamp_sec = 0.0
+                if "kf_map" in locals() and video_id in kf_map:
+                    for f in kf_map[video_id]:
+                        if f["frame_idx"] == frame_idx:
+                            timestamp_sec = f["timestamp_sec"]
+                            break
+                            
+                records.append({
+                    "text": text,
+                    "source": "ocr",
+                    "video_id": video_id,
+                    "frame_idx": frame_idx,
+                    "timestamp_sec": timestamp_sec
+                })
+                ocr_count += 1
+            except Exception:
+                pass
+        print(f"  + Đã thêm {ocr_count} records từ OCR.")
+    else:
+        print("  - Không tìm thấy ocr.json")
+
     return records
 
 def build_dense_text_index(records):

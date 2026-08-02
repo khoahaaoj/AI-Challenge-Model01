@@ -39,6 +39,22 @@ def detect_query_type(query: str) -> str:
     # Mặc định là KIS (Known-Item Search)
     return "kis"
 
+def remove_qa_keywords(query: str) -> str:
+    """Loại bỏ các từ để hỏi khỏi query để hệ thống search (SigLIP, BM25) tìm chính xác subject hơn."""
+    qa_keywords = [
+        "có màu gì", "màu gì", "là ai", "ai là", "là gì", "như thế nào", 
+        "ở đâu", "khi nào", "tên gì", "làm gì", "có bao nhiêu", "bao nhiêu", "cái gì"
+    ]
+    q = query
+    q_lower = query.lower()
+    for kw in qa_keywords:
+        if kw in q_lower:
+            # Tìm vị trí và cắt bỏ (giữ nguyên case các chữ khác)
+            idx = q_lower.find(kw)
+            q = q[:idx] + q[idx+len(kw):]
+            q_lower = q.lower()
+    return q.replace("?", "").strip()
+
 
 def generate_answer_for_frame(image_path: str, question: str) -> str:
     """

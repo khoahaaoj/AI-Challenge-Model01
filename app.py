@@ -38,12 +38,24 @@ def find_video_path(video_id: str) -> str | None:
     return None
 
 
-def to_submission_record(item: dict) -> dict:
+def to_submission_record(item: dict, query_type: str) -> dict:
     """Chuyển 1 kết quả sang format nộp bài AIC."""
+    if query_type == "trake":
+        if "edited_frame_ids" in item:
+            frame_ids = item["edited_frame_ids"]
+        elif "trake_events" in item:
+            frame_ids = [ev["frame_idx"] for ev in item["trake_events"]]
+        else:
+            frame_ids = [item["frame_idx"]]
+        return {
+            "video_id": item["video_id"],
+            "frame_ids": frame_ids
+        }
+
     record = {
         "video_id":      item["video_id"],
         "frame_idx":     item["frame_idx"],
-        "timestamp_sec": round(item["timestamp_sec"], 2),
+        "timestamp_sec": round(item.get("timestamp_sec", 0), 2),
         "keyframe_path": item.get("path", ""),
     }
     # Thêm câu trả lời nếu có (cho dạng QA)
@@ -104,12 +116,15 @@ with st.sidebar:
     if n_selected == 0:
         st.caption("Tick ✅ vào keyframe đúng bên dưới để thêm vào danh sách nộp.")
     else:
-        records = [to_submission_record(v) for v in st.session_state.selected.values()]
+        records = [to_submission_record(v, st.session_state.query_type) for v in st.session_state.selected.values()]
 
         # Hiển thị preview danh sách đã chọn
         with st.expander("Xem danh sách đã chọn", expanded=False):
             for r in records:
-                st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}` · `{r['timestamp_sec']}s`")
+                if st.session_state.query_type == "trake":
+                    st.markdown(f"- `{r['video_id']}` · frames `{r['frame_ids']}`")
+                else:
+                    st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}` · `{r.get('timestamp_sec', '')}s`")
 
         st.download_button(
             label="⬇️ Tải JSON (AIC format)",
@@ -119,19 +134,27 @@ with st.sidebar:
             use_container_width=True,
         )
         # CSV Header
-        csv_header = "video_id,frame_idx,timestamp_sec,keyframe_path"
-        if st.session_state.query_type == "qa":
-            csv_header += ",answer"
+        if st.session_state.query_type == "trake":
+            csv_header = "video_id,frame_ids"
+        else:
+            csv_header = "video_id,frame_idx,timestamp_sec,keyframe_path"
+            if st.session_state.query_type == "qa":
+                csv_header += ",answer"
             
         csv_lines = [csv_header]
         # Quy chế BTC: Nộp tối đa 100 kết quả
         for r in records[:100]:
-            line = f"{r['video_id']},{r['frame_idx']},{r['timestamp_sec']},{r.get('keyframe_path', '')}"
-            if st.session_state.query_type == "qa":
-                # Escape dấu phẩy trong answer
-                ans = str(r.get('answer', '')).replace('"', '""')
-                line += f',"{ans}"'
-            csv_lines.append(line)
+            if st.session_state.query_type == "trake":
+                # Escape array if written to CSV
+                frame_ids_str = str(r['frame_ids']).replace('"', '""')
+                csv_lines.append(f"{r['video_id']},\"{frame_ids_str}\"")
+            else:
+                line = f"{r['video_id']},{r['frame_idx']},{r.get('timestamp_sec', '')},{r.get('keyframe_path', '')}"
+                if st.session_state.query_type == "qa":
+                    # Escape dấu phẩy trong answer
+                    ans = str(r.get('answer', '')).replace('"', '""')
+                    line += f',"{ans}"'
+                csv_lines.append(line)
 
         st.download_button(
             label="⬇️ Tải CSV",
@@ -191,8 +214,9 @@ if search_clicked and query.strip():
                 st.session_state.last_results = flat_results[:top_k_display]
                 
             else:
+                search_q = qa_module.remove_qa_keywords(query) if q_type == "qa" else query
                 fused, reranked, verified = search_utils.full_search(
-                    query, fusion_method=fusion_method, do_verify=do_verify
+                    search_q, fusion_method=fusion_method, do_verify=do_verify
                 )
                 st.session_state.last_results = (
                     (verified if verified is not None else reranked)[:top_k_display]
@@ -259,9 +283,19 @@ if results:
                 st.caption("  ·  ".join(badges))
                 
                 if "trake_events" in item and len(item["trake_events"]) > 1:
-                    with st.expander("👁️ Xem các sự kiện trong chuỗi"):
+                    with st.expander("👁️ Xem và chỉnh sửa chuỗi sự kiện (TRAKE)"):
+                        default_frames = ", ".join(str(ev["frame_idx"]) for ev in item["trake_events"])
+                        edit_key = f"trake_edit_{item['video_id']}_{item['frame_idx']}"
+                        
+                        edited_str = st.text_input(
+                            "Danh sách Frame IDs (cách nhau bởi dấu phẩy):", 
+                            value=default_frames, 
+                            key=edit_key
+                        )
+                        item["edited_frame_ids"] = [int(x.strip()) for x in edited_str.split(",") if x.strip().isdigit()]
+                        
                         for ev_idx, ev in enumerate(item["trake_events"]):
-                            st.markdown(f"**Sự kiện {ev_idx+1}:** Frame `{ev['frame_idx']}` lúc `{ev['timestamp_sec']}s`")
+                            st.caption(f"- Sự kiện {ev_idx+1}: Frame `{ev['frame_idx']}` lúc `{ev['timestamp_sec']}s`")
 
                 # ---- Text khớp (nếu có) ----
                 if item.get("matched_text"):
@@ -289,11 +323,13 @@ if results:
                     ans_key = f"ans_{item['video_id']}_{item['frame_idx']}"
                     
                     st.markdown("**Câu trả lời cho Q&A:**")
+                    if ans_key not in st.session_state:
+                        st.session_state[ans_key] = item.get("answer", "")
+                        
                     col_ans, col_btn_ans = st.columns([3, 1])
                     with col_ans:
                         ans_val = st.text_input(
                             "Đáp án", 
-                            value=item.get("answer", ""), 
                             key=ans_key, 
                             label_visibility="collapsed"
                         )
@@ -301,25 +337,37 @@ if results:
                         if ans_val:
                             item["answer"] = ans_val
                             
+                    def ai_callback(i_dict, i_path, q_disp, a_key):
+                        a_ans = qa_module.generate_answer_for_frame(i_path, q_disp)
+                        i_dict["answer"] = a_ans
+                        st.session_state[a_key] = a_ans
+                        
                     with col_btn_ans:
-                        if st.button("🤖 AI", key=f"btn_qa_{item['video_id']}_{item['frame_idx']}", help="Dùng Gemini sinh câu trả lời"):
-                            if has_image:
-                                auto_ans = qa_module.generate_answer_for_frame(img_path, q_display)
-                                item["answer"] = auto_ans
-                                st.rerun()
-                            else:
-                                st.error("Cần ảnh gốc")
+                        st.button(
+                            "🤖 AI", 
+                            key=f"btn_qa_{item['video_id']}_{item['frame_idx']}", 
+                            help="Dùng Gemini sinh câu trả lời",
+                            on_click=ai_callback,
+                            args=(item, img_path, q_display, ans_key),
+                            disabled=not has_image
+                        )
 
                 # ---- Checkbox chọn để nộp bài ----
-                checked = st.checkbox(
+                chk_key = f"chk_{item['video_id']}_{item['frame_idx']}"
+                
+                def toggle_selection(s_key, c_item, c_key):
+                    # Đọc trạng thái mới nhất của checkbox từ session_state
+                    if st.session_state.get(c_key, False):
+                        st.session_state.selected[s_key] = c_item.copy()
+                    elif s_key in st.session_state.selected:
+                        del st.session_state.selected[s_key]
+
+                st.checkbox(
                     "✅ Chọn để nộp",
                     value=is_selected,
-                    key=f"chk_{item['video_id']}_{item['frame_idx']}",
+                    key=chk_key,
+                    on_change=toggle_selection,
+                    args=(sel_key, item, chk_key)
                 )
-                if checked:
-                    # Lưu lại state mới nhất (bao gồm cả answer nếu có)
-                    st.session_state.selected[sel_key] = item.copy()
-                elif sel_key in st.session_state.selected:
-                    del st.session_state.selected[sel_key]
 
                 st.markdown("---")
