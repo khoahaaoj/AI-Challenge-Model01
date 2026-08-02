@@ -43,3 +43,21 @@ Pillow
 numpy
 tqdm
 python-dotenv
+
+# ==== Language detection (local, không cần API) ====
+# Dùng để phát hiện tiếng Việt vs tiếng Anh trước khi dịch query cho SigLIP2.
+# Thay thế heuristic isascii() bị lỗi với tiếng Việt không dấu.
+# (xem tokenizer_utils.py::detect_language và AIC2026_Deep_Audit_Report.md mục 3.9)
+langid
+
+# ==== NLLB-200 local translation fallback ====
+# Dùng để dịch query Vi→En khi Gemini API lỗi hoặc mất mạng lúc thi đấu.
+# transformers đã có sẵn (FlagEmbedding dependency), sentencepiece cần thêm.
+# Model facebook/nllb-200-distilled-600M sẽ tự download (~2.4GB) lần đầu chạy.
+sentencepiece
+
+# ==== Vietnamese word tokenizer (TÙY CHỌN, cải thiện BM25 với từ ghép) ====
+# Giúp BM25 tách đúng "thủ tướng" thành 1 token thay vì 2 token riêng.
+# QUAN TRỌNG: nếu cài thì phải build lại BM25 index (xóa index/bm25_index.pkl).
+# Lý do: tokenizer build-time và search-time phải GIỐNG NHAU (đã fix trong code).
+# underthesea  # bỏ comment để cài: pip install underthesea

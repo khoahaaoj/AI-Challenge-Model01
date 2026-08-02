@@ -16,6 +16,8 @@ from PIL import Image
 
 import config
 import search_utils
+import qa_module
+import trake_module
 
 st.set_page_config(
     page_title="AIC 2026 — Video Retrieval",
@@ -37,13 +39,17 @@ def find_video_path(video_id: str) -> str | None:
 
 
 def to_submission_record(item: dict) -> dict:
-    """Chuyển 1 kết quả sang format nộp bài AIC: video_id + frame_idx + timestamp."""
-    return {
+    """Chuyển 1 kết quả sang format nộp bài AIC."""
+    record = {
         "video_id":      item["video_id"],
         "frame_idx":     item["frame_idx"],
         "timestamp_sec": round(item["timestamp_sec"], 2),
         "keyframe_path": item.get("path", ""),
     }
+    # Thêm câu trả lời nếu có (cho dạng QA)
+    if "answer" in item:
+        record["answer"] = item["answer"]
+    return record
 
 
 # =================================================================
@@ -56,6 +62,8 @@ if "last_results" not in st.session_state:
     st.session_state.last_results = []
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
+if "query_type" not in st.session_state:
+    st.session_state.query_type = "kis"
 
 
 # =================================================================
@@ -110,15 +118,24 @@ with st.sidebar:
             mime="application/json",
             use_container_width=True,
         )
+        # CSV Header
+        csv_header = "video_id,frame_idx,timestamp_sec,keyframe_path"
+        if st.session_state.query_type == "qa":
+            csv_header += ",answer"
+            
+        csv_lines = [csv_header]
+        # Quy chế BTC: Nộp tối đa 100 kết quả
+        for r in records[:100]:
+            line = f"{r['video_id']},{r['frame_idx']},{r['timestamp_sec']},{r.get('keyframe_path', '')}"
+            if st.session_state.query_type == "qa":
+                # Escape dấu phẩy trong answer
+                ans = str(r.get('answer', '')).replace('"', '""')
+                line += f',"{ans}"'
+            csv_lines.append(line)
+
         st.download_button(
             label="⬇️ Tải CSV",
-            data="\n".join(
-                ["video_id,frame_idx,timestamp_sec,keyframe_path"]
-                + [
-                    f"{r['video_id']},{r['frame_idx']},{r['timestamp_sec']},{r['keyframe_path']}"
-                    for r in records
-                ]
-            ),
+            data="\n".join(csv_lines),
             file_name="aic_submission.csv",
             mime="text/csv",
             use_container_width=True,
@@ -155,17 +172,34 @@ with col_btn:
 if search_clicked and query.strip():
     with st.spinner("Đang tìm kiếm (SigLIP2 + BGE-M3 + BM25 → fusion → rerank)..."):
         try:
-            fused, reranked, verified = search_utils.full_search(
-                query, fusion_method=fusion_method, do_verify=do_verify
-            )
+            q_type = qa_module.detect_query_type(query)
+            st.session_state.query_type = q_type
+            st.session_state.last_query = query
+            
+            if q_type == "trake":
+                st.info("🔄 Đang xử lý truy vấn TRAKE (Tìm chuỗi sự kiện)...")
+                sequences = trake_module.search_trake_sequence(query, top_k_per_event=100, time_window_sec=60)
+                
+                flat_results = []
+                for seq in sequences:
+                    rep_item = seq["events"][0].copy()
+                    rep_item["trake_info"] = f"Chuỗi {len(seq['events'])} sự kiện"
+                    rep_item["trake_events"] = seq["events"]
+                    rep_item["fused_score"] = seq["total_score"]
+                    flat_results.append(rep_item)
+                    
+                st.session_state.last_results = flat_results[:top_k_display]
+                
+            else:
+                fused, reranked, verified = search_utils.full_search(
+                    query, fusion_method=fusion_method, do_verify=do_verify
+                )
+                st.session_state.last_results = (
+                    (verified if verified is not None else reranked)[:top_k_display]
+                )
         except RuntimeError as e:
             st.error(str(e))
             st.stop()
-
-    st.session_state.last_results = (
-        (verified if verified is not None else reranked)[:top_k_display]
-    )
-    st.session_state.last_query = query
 
 elif search_clicked:
     st.warning("Vui lòng nhập truy vấn trước khi tìm kiếm.")
@@ -177,7 +211,10 @@ elif search_clicked:
 results = st.session_state.last_results
 if results:
     q_display = st.session_state.last_query
-    st.subheader(f'Kết quả cho: "{q_display}" — {len(results)} keyframe')
+    q_type = st.session_state.query_type
+    type_badge = {"kis": "Nomal (KIS)", "qa": "Hỏi Đáp (Q&A)", "trake": "Sự kiện (TRAKE)"}[q_type]
+    
+    st.subheader(f'Kết quả cho: "{q_display}" — {len(results)} keyframe [{type_badge}]')
     st.divider()
 
     for row_start in range(0, len(results), cols_per_row):
@@ -190,9 +227,16 @@ if results:
 
             with col:
                 # ---- Ảnh keyframe ----
+                img_path = item.get("path", "")
+                has_image = os.path.exists(img_path) if img_path else False
+                
                 try:
-                    img = Image.open(item["path"]).convert("RGB")
-                    st.image(img, use_container_width=True)
+                    if has_image:
+                        img = Image.open(img_path).convert("RGB")
+                        st.image(img, use_container_width=True)
+                    else:
+                        # Với data BTC chưa tải keyframes zip, sẽ không có ảnh cục bộ
+                        st.info("🖼️ Không có file ảnh cục bộ (chưa tải Keyframes)")
                 except Exception:
                     st.warning("⚠️ Không tải được ảnh")
 
@@ -204,12 +248,20 @@ if results:
 
                 # ---- Điểm số ----
                 badges = []
+                if "trake_info" in item:
+                    badges.append(f"🔄 **{item['trake_info']}**")
                 if item.get("verify_score") is not None:
                     badges.append(f"🎯 Gemini `{item['verify_score']}/10`")
-                badges.append(f"📊 Rerank `{item.get('rerank_score', 0):.3f}`")
+                if item.get("rerank_score"):
+                    badges.append(f"📊 Rerank `{item.get('rerank_score', 0):.3f}`")
                 if item.get("fused_score") is not None:
-                    badges.append(f"🔀 RRF `{item['fused_score']:.4f}`")
+                    badges.append(f"🔀 Score `{item['fused_score']:.4f}`")
                 st.caption("  ·  ".join(badges))
+                
+                if "trake_events" in item and len(item["trake_events"]) > 1:
+                    with st.expander("👁️ Xem các sự kiện trong chuỗi"):
+                        for ev_idx, ev in enumerate(item["trake_events"]):
+                            st.markdown(f"**Sự kiện {ev_idx+1}:** Frame `{ev['frame_idx']}` lúc `{ev['timestamp_sec']}s`")
 
                 # ---- Text khớp (nếu có) ----
                 if item.get("matched_text"):
@@ -232,6 +284,32 @@ if results:
                 else:
                     st.caption("_(Không tìm thấy file video gốc trong data/videos/)_")
 
+                # ---- Q&A Module (Nếu là query QA) ----
+                if q_type == "qa":
+                    ans_key = f"ans_{item['video_id']}_{item['frame_idx']}"
+                    
+                    st.markdown("**Câu trả lời cho Q&A:**")
+                    col_ans, col_btn_ans = st.columns([3, 1])
+                    with col_ans:
+                        ans_val = st.text_input(
+                            "Đáp án", 
+                            value=item.get("answer", ""), 
+                            key=ans_key, 
+                            label_visibility="collapsed"
+                        )
+                        # Lưu lại vào item để xuất file
+                        if ans_val:
+                            item["answer"] = ans_val
+                            
+                    with col_btn_ans:
+                        if st.button("🤖 AI", key=f"btn_qa_{item['video_id']}_{item['frame_idx']}", help="Dùng Gemini sinh câu trả lời"):
+                            if has_image:
+                                auto_ans = qa_module.generate_answer_for_frame(img_path, q_display)
+                                item["answer"] = auto_ans
+                                st.rerun()
+                            else:
+                                st.error("Cần ảnh gốc")
+
                 # ---- Checkbox chọn để nộp bài ----
                 checked = st.checkbox(
                     "✅ Chọn để nộp",
@@ -239,7 +317,8 @@ if results:
                     key=f"chk_{item['video_id']}_{item['frame_idx']}",
                 )
                 if checked:
-                    st.session_state.selected[sel_key] = item
+                    # Lưu lại state mới nhất (bao gồm cả answer nếu có)
+                    st.session_state.selected[sel_key] = item.copy()
                 elif sel_key in st.session_state.selected:
                     del st.session_state.selected[sel_key]
 

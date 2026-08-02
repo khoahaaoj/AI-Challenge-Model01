@@ -25,26 +25,51 @@ print(f"[config] Đang chạy trên thiết bị: {DEVICE}")
 # =================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VIDEO_DIR = os.path.join(BASE_DIR, "data", "videos")        # nơi bạn bỏ video gốc vào
-KEYFRAME_DIR = os.path.join(BASE_DIR, "data", "keyframes")  # ảnh keyframe được sinh ra
-CACHE_DIR = os.path.join(BASE_DIR, "cache")                 # cache JSON (transcript, caption, ocr...)
-INDEX_DIR = os.path.join(BASE_DIR, "index")                 # FAISS index đã build
+VIDEO_DIR    = os.path.join(BASE_DIR, "data", "videos")      # nơi bạn bỏ video gốc vào
+KEYFRAME_DIR = os.path.join(BASE_DIR, "data", "keyframes")  # ảnh keyframe được sinh ra (tự trích)
+CACHE_DIR    = os.path.join(BASE_DIR, "cache")               # cache JSON (transcript, caption, ocr...)
+INDEX_DIR    = os.path.join(BASE_DIR, "index")               # FAISS index đã build
 
-for _d in [VIDEO_DIR, KEYFRAME_DIR, CACHE_DIR, INDEX_DIR]:
+# ---- Thư mục dữ liệu chính thức của BTC ----
+BTC_DIR       = os.path.join(BASE_DIR, "data", "btc")
+BTC_MAP_KF    = os.path.join(BTC_DIR, "map_keyframes", "map-keyframes")   # 873 CSV keyframe maps
+BTC_MEDIA_DIR = os.path.join(BTC_DIR, "media_info",   "media-info")       # 873 JSON YouTube metadata
+BTC_CLIP_DIR  = os.path.join(BTC_DIR, "clip_features", "clip-features-32") # 873 .npy CLIP features
+BTC_OBJ_DIR   = os.path.join(BTC_DIR, "objects")                           # object detection JSON (nếu đã tải)
+
+for _d in [VIDEO_DIR, KEYFRAME_DIR, CACHE_DIR, INDEX_DIR, BTC_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 # ---- Các file cache cụ thể ----
-KEYFRAME_META_CACHE = os.path.join(CACHE_DIR, "keyframe_meta.json")  # metadata keyframe: video_id, frame_idx, timestamp, path
-TRANSCRIPT_CACHE = os.path.join(CACHE_DIR, "transcripts.json")       # transcript Whisper theo từng video
-CAPTION_CACHE = os.path.join(CACHE_DIR, "captions.json")             # caption Qwen2-VL theo từng ảnh keyframe (key = path ảnh)
-OCR_CACHE = os.path.join(CACHE_DIR, "ocr.json")                      # text OCR theo từng ảnh keyframe (key = path ảnh)
+KEYFRAME_META_CACHE  = os.path.join(CACHE_DIR, "keyframe_meta.json")   # metadata keyframe tự trích (cũ)
+BTC_KF_META_CACHE    = os.path.join(CACHE_DIR, "btc_keyframe_meta.json") # metadata keyframe BTC (chính thức)
+BTC_MEDIA_INFO_CACHE = os.path.join(CACHE_DIR, "btc_media_info.json")   # YouTube metadata BTC
+TRANSCRIPT_CACHE     = os.path.join(CACHE_DIR, "transcripts.json")      # transcript Whisper
+CAPTION_CACHE        = os.path.join(CACHE_DIR, "captions.json")         # caption Qwen2-VL
+OCR_CACHE            = os.path.join(CACHE_DIR, "ocr.json")              # text OCR
+
+# =================================================================
+# CHỌN NGUỒN DỮ LIỆU: BTC (chính thức) vs TỰ TRÍCH (cũ)
+# =================================================================
+# USE_BTC_DATA = True  → dùng keyframe map + CLIP features của BTC
+#   - frame_idx khớp với ground truth BTC → điểm chính xác
+#   - Image FAISS dim=512 (ViT-B/32), 177.321 keyframes
+# USE_BTC_DATA = False → dùng keyframe tự trích (chỉ 2 video demo)
+USE_BTC_DATA = True
 
 # ---- Các file FAISS index ----
-IMAGE_INDEX_PATH = os.path.join(INDEX_DIR, "image_index.faiss")
-IMAGE_ID_MAP_PATH = os.path.join(INDEX_DIR, "image_id_map.json")     # vị trí trong FAISS -> metadata keyframe
-TEXT_INDEX_PATH = os.path.join(INDEX_DIR, "text_index.faiss")
-TEXT_ID_MAP_PATH = os.path.join(INDEX_DIR, "text_id_map.json")       # vị trí trong FAISS -> record text (caption/ocr/transcript)
-BM25_INDEX_PATH  = os.path.join(INDEX_DIR, "bm25_index.pkl")          # BM25 sparse index (pickle, không cần GPU)
+if USE_BTC_DATA:
+    IMAGE_INDEX_PATH  = os.path.join(INDEX_DIR, "btc_image_index.faiss")  # BTC CLIP ViT-B/32, dim=512
+    IMAGE_ID_MAP_PATH = os.path.join(INDEX_DIR, "btc_image_id_map.json")
+    TEXT_INDEX_PATH   = os.path.join(INDEX_DIR, "btc_text_index.faiss")
+    TEXT_ID_MAP_PATH  = os.path.join(INDEX_DIR, "btc_text_id_map.json")
+    BM25_INDEX_PATH   = os.path.join(INDEX_DIR, "btc_bm25_index.pkl")
+else:
+    IMAGE_INDEX_PATH  = os.path.join(INDEX_DIR, "image_index.faiss")      # SigLIP2, dim=768
+    IMAGE_ID_MAP_PATH = os.path.join(INDEX_DIR, "image_id_map.json")
+    TEXT_INDEX_PATH   = os.path.join(INDEX_DIR, "text_index.faiss")
+    TEXT_ID_MAP_PATH  = os.path.join(INDEX_DIR, "text_id_map.json")
+    BM25_INDEX_PATH   = os.path.join(INDEX_DIR, "bm25_index.pkl")
 
 # =================================================================
 # BƯỚC TÁCH CẢNH (PySceneDetect)
@@ -69,16 +94,17 @@ WHISPER_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 # =================================================================
 # CLIP (Image encoder - nhánh tìm theo nội dung hình ảnh)
 # =================================================================
-# Nâng cấp lên SigLIP2 ViT-B-16 (Google, 2024):
-#   - Accuracy zero-shot cao hơn ~10% so với ViT-B-32 OpenAI
-#   - Training objective tốt hơn (sigmoid loss thay vì softmax contrastive)
-#   - VRAM tương đương (~400MB), an toàn với 4GB
-#   - Load qua hf-hub, cần open_clip_torch >= 2.31.0
-# Lưu ý: SigLIP2 vẫn train chủ yếu tiếng Anh -> vẫn cần dịch query Vi->En
-# trước khi encode (xem translate_query_for_clip trong search_utils.py).
-# ⚠️  IMAGE INDEX PHẢI BUILD LẠI khi đổi model (dim thay đổi: 512 -> 768).
-CLIP_MODEL_NAME = "hf-hub:timm/ViT-B-16-SigLIP2"
-CLIP_PRETRAINED = None  # không cần khi load từ hf-hub
+# Khi USE_BTC_DATA=True: dùng ViT-B/32 OpenAI (dim=512) để khớp với
+# CLIP features đã có sẵn của BTC (không cần re-encode ảnh).
+# Khi USE_BTC_DATA=False: dùng SigLIP2 ViT-B-16 (dim=768, chất lượng cao hơn)
+# nhưng phải tự encode keyframe từ ảnh → tốn VRAM + thời gian.
+# ⚠️  CLIP text encoder phải CÙNG model với image encoder đã dùng khi build index!
+if USE_BTC_DATA:
+    CLIP_MODEL_NAME = "ViT-B-32"        # OpenAI ViT-B/32 — khớp với BTC CLIP features
+    CLIP_PRETRAINED = "openai"          # pretrained weights
+else:
+    CLIP_MODEL_NAME = "hf-hub:timm/ViT-B-16-SigLIP2"  # SigLIP2, chất lượng cao hơn
+    CLIP_PRETRAINED = None
 # Batch size khi encode ảnh (build_index.py). 16 an toàn với 4GB VRAM.
 CLIP_BATCH_SIZE = 16
 
@@ -110,8 +136,8 @@ OCR_LANGS = ["vi", "en"]  # đọc được cả chữ tiếng Việt (có dấu
 # =================================================================
 # THAM SỐ TÌM KIẾM (search / fusion / rerank)
 # =================================================================
-TOP_K_RETRIEVE = 50      # số kết quả lấy ra ở mỗi nhánh (CLIP / BGE-M3) trước khi fusion
-TOP_K_RERANK = 10        # số kết quả cuối cùng sau khi CrossEncoder rerank
+TOP_K_RETRIEVE = 100     # số kết quả lấy ra ở mỗi nhánh trước khi fusion
+TOP_K_RERANK   = 100     # BTC cho phép nộp tối đa 100 câu → rerank hết 100 để tận dụng R@50/R@100
 
 FUSION_METHOD = "rrf"    # "rrf" (khuyến nghị) hoặc "weighted"
 RRF_K = 60                # hằng số k trong công thức Reciprocal Rank Fusion (giá trị phổ biến trong literature)

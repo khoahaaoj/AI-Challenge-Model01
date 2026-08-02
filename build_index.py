@@ -212,7 +212,7 @@ def build_captions(keyframe_meta):
             ).to(device)
 
             with torch.no_grad():
-                generated_ids = qwen_model.generate(**inputs, max_new_tokens=50)
+                generated_ids = qwen_model.generate(**inputs, max_new_tokens=100)  # tăng từ 50→100 (caption tiếng Việt cần nhiều token hơn tiếng Anh)
 
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -378,6 +378,10 @@ def build_bm25_index(records):
     exact keyword match — tên người, địa danh, thương hiệu, số liệu.
     Không cần GPU, không tốn VRAM, build cực nhanh (<5s).
 
+    FIX (mục 5.1 Audit Report): dùng tokenizer_utils.get_tokenizer() dùng chung
+    với search_utils.py. Flag "used_underthesea" được lưu vào pickle để search_bm25()
+    tự động tokenize query đúng theo cách đã build — tránh bug silent recall drop.
+
     Tokenizer:
       - Nếu đã cài underthesea: tách từ tiếng Việt chính xác hơn
         (pip install underthesea). Tốt hơn với query ghép từ như "thủ tướng chính phủ".
@@ -385,6 +389,7 @@ def build_bm25_index(records):
     """
     import pickle
     from rank_bm25 import BM25Okapi
+    from tokenizer_utils import get_tokenizer
 
     if os.path.exists(config.BM25_INDEX_PATH):
         print("[BM25] Đã có index → bỏ qua. (Xóa index/bm25_index.pkl để build lại)")
@@ -394,25 +399,30 @@ def build_bm25_index(records):
         print("[BM25] Không có records → bỏ qua.")
         return
 
-    # Chọn tokenizer: underthesea nếu có, fallback simple split
-    try:
-        from underthesea import word_tokenize
-        def _tokenize(text):
-            return word_tokenize(text.lower(), format="text").split()
-        print("[BM25] Dùng underthesea word_tokenize (tiếng Việt tốt hơn).")
-    except ImportError:
-        def _tokenize(text):
-            return text.lower().split()
-        print("[BM25] Dùng str.split() (cài underthesea để cải thiện tiếng Việt).")
+    # FIX: dùng hàm tokenize TỪ MODULE DÙNG CHUNG (tokenizer_utils.py)
+    # → search_utils.py sẽ đọc flag "used_underthesea" từ pickle và dùng đúng tokenizer
+    _tokenize, used_underthesea = get_tokenizer(use_underthesea=None)  # auto-detect
+    if used_underthesea:
+        print("[BM25] Dùng underthesea word_tokenize (tiếng Việt tốt hơn). "
+              "Flag 'used_underthesea=True' sẽ được lưu vào pickle.")
+    else:
+        print("[BM25] Dùng str.split() (cài underthesea để cải thiện tiếng Việt). "
+              "Flag 'used_underthesea=False' sẽ được lưu vào pickle.")
 
     print(f"[BM25] Tokenize và build index từ {len(records)} records...")
     tokenized_corpus = [_tokenize(r["text"]) for r in records]
     bm25 = BM25Okapi(tokenized_corpus)
 
     with open(config.BM25_INDEX_PATH, "wb") as f:
-        pickle.dump({"bm25": bm25, "records": records}, f)
+        # Lưu cờ used_underthesea cùng index để search_utils đọc và tokenize query đúng
+        pickle.dump({
+            "bm25": bm25,
+            "records": records,
+            "used_underthesea": used_underthesea,  # FIX mục 5.1: flag để search khớp tokenizer
+        }, f)
 
-    print(f"[BM25] ✅ Đã build BM25 index với {len(records)} records.")
+    print(f"[BM25] ✅ Đã build BM25 index với {len(records)} records "
+          f"(tokenizer: {'underthesea' if used_underthesea else 'str.split()'}).")
 
 
 # =================================================================
