@@ -253,8 +253,11 @@ if search_clicked and query.strip():
                 st.session_state.last_results = (
                     (verified if verified is not None else reranked)[:top_k_display]
                 )
-        except RuntimeError as e:
-            st.error(str(e))
+        except Exception as e:
+            import traceback
+            st.error(f"❌ Lỗi: {str(e)}")
+            with st.expander("🔍 Full Traceback (debug)"):
+                st.code(traceback.format_exc())
             st.stop()
 
 elif search_clicked:

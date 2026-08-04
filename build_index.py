@@ -175,11 +175,15 @@ def build_captions(keyframe_meta):
     ) if device == "cuda" else None
 
     # Tải model 4-bit
+    # FIX: dùng torch_dtype thay vì dtype (từ đúng cho from_pretrained)
+    # FIX: low_cpu_mem_usage=True để tránh lỗi "Cannot copy out of meta tensor"
+    #      xảy ra khi dùng device_map='auto' + transformers >= 4.40
     qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
         "Qwen/Qwen2-VL-2B-Instruct",
         quantization_config=bnb_config,
         device_map="auto" if device == "cuda" else None,
-        dtype=torch.float16 if device == "cuda" else torch.float32
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        low_cpu_mem_usage=True,
     )
 
     # Giới hạn max_pixels để tiết kiệm bộ nhớ khi encode ảnh

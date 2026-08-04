@@ -142,9 +142,8 @@ def get_reranker_model():
 def get_gemini_model():
     global _gemini_model
     if _gemini_model is None:
-        import google.generativeai as genai
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel(config.GEMINI_MODEL)
+        from google import genai
+        _gemini_model = genai.Client(api_key=config.GEMINI_API_KEY)
     return _gemini_model
 
 
@@ -230,7 +229,7 @@ def expand_query_with_gemini(query: str) -> list[str]:
         return _query_expansion_cache[query]
 
     try:
-        model = get_gemini_model()
+        client = get_gemini_model()
         prompt = (
             f'You are a search query expansion expert for a Vietnamese video retrieval system.\n'
             f'Given the search query below, generate 2 alternative Vietnamese phrasings that '
@@ -239,7 +238,10 @@ def expand_query_with_gemini(query: str) -> list[str]:
             f'Output ONLY a valid JSON array of 2 strings (no markdown, no explanation).\n'
             f'Example: ["alt phrasing 1", "alt phrasing 2"]'
         )
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=prompt
+        )
         raw = (response.text or "").strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
@@ -261,24 +263,24 @@ def translate_query_for_clip(query):
     """
     Dịch query tiếng Việt sang tiếng Anh.
     Chiến lược: langid detect → Gemini API → NLLB-200 local fallback → query gốc.
-
-    FIX: thay isascii() bằng langid để xử lý đúng tiếng Việt không dấu.
-    FIX: thêm NLLB local fallback khi Gemini lỗi/mất mạng lúc thi đấu.
     """
     lang = detect_language(query)
     if lang == "en":
         return query
 
-    # Thử Gemini trước (nhanh + chất lượng cao)
     if config.GEMINI_API_KEY:
         try:
-            model = get_gemini_model()
+            client = get_gemini_model()
+            from google import genai
             prompt = (
                 f'Translate the following Vietnamese search query to English. '
                 f'Output ONLY the translated English text, nothing else.\n'
                 f'Query: "{query}"'
             )
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=prompt
+            )
             translated = (response.text or "").strip()
             if translated:
                 print(f"[CLIP][Gemini] Dịch: '{query}' → '{translated}'")
@@ -607,7 +609,7 @@ def verify_with_gemini(query, candidates):
             c["verify_score"] = None
         return candidates
 
-    model = get_gemini_model()
+    client = get_gemini_model()
     prompt_template = (
         'You are scoring video keyframe retrieval results.\n'
         'Query (Vietnamese or English): "{query}"\n'
@@ -625,8 +627,18 @@ def verify_with_gemini(query, candidates):
             if not img_path or not os.path.exists(img_path):
                 c["verify_score"] = 0
                 return
-            image = Image.open(img_path).convert("RGB")
-            response = model.generate_content([prompt_template.format(query=query), image])
+            from google import genai as _genai
+            from google.genai import types as _gtypes
+            image_bytes = open(img_path, "rb").read()
+            ext = os.path.splitext(img_path)[1].lower()
+            mime = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png'}.get(ext, 'image/jpeg')
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=[
+                    _gtypes.Part.from_bytes(data=image_bytes, mime_type=mime),
+                    prompt_template.format(query=query)
+                ]
+            )
             raw = (response.text or "").strip()
             try:
                 import json as _json
@@ -640,8 +652,7 @@ def verify_with_gemini(query, candidates):
             c["verify_score"] = None
 
     import concurrent.futures
-    # Hạ max_workers xuống 3 để tránh bị Google chặn API (Rate Limit 15 req/min của bản Free)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(_score_single, candidates)
 
     def sort_key(c):

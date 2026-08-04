@@ -66,12 +66,6 @@ def generate_answer_for_frame(image_path: str, question: str) -> str:
 
     if not os.path.exists(image_path):
         return f"Lỗi: Không tìm thấy ảnh tại {image_path}"
-
-    import google.generativeai as genai
-    genai.configure(api_key=config.GEMINI_API_KEY)
-    
-    # Dùng flash-lite cho tốc độ nhanh, hoặc pro nếu cần siêu chính xác
-    model = genai.GenerativeModel(config.GEMINI_MODEL)
     
     prompt = (
         f"Bạn là một trợ lý phân tích video. Hãy nhìn vào bức ảnh này và trả lời câu hỏi dưới đây bằng tiếng Việt.\n"
@@ -81,8 +75,19 @@ def generate_answer_for_frame(image_path: str, question: str) -> str:
     )
     
     try:
-        image = Image.open(image_path).convert("RGB")
-        response = model.generate_content([prompt, image])
+        from google import genai
+        from google.genai import types as _gtypes
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        image_bytes = open(image_path, "rb").read()
+        ext = os.path.splitext(image_path)[1].lower()
+        mime = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png'}.get(ext, 'image/jpeg')
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=[
+                _gtypes.Part.from_bytes(data=image_bytes, mime_type=mime),
+                prompt
+            ]
+        )
         return (response.text or "").strip()
     except Exception as e:
         return f"Lỗi API: {str(e)}"
