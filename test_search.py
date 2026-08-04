@@ -1,5 +1,4 @@
 import sys
-sys.path.append("/home/khoaha/PyCharmMiscProject/khoa/aic_retrieval")
 import search_utils
 import qa_module
 

@@ -106,6 +106,11 @@ with st.sidebar:
     )
     cols_per_row = st.slider("Cột hiển thị", 2, 5, 3)
     top_k_display = st.slider("Số kết quả", 1, 10, 10)
+    use_expansion = st.checkbox(
+        "🔍 Query Expansion (Gemini)",
+        value=False,
+        help="Gemini tự sinh 2 cách diễn đạt khác nhau, tăng Recall cho BM25. Chậm hơn ~1-2s lần đầu."
+    )
 
     st.divider()
 
@@ -126,6 +131,26 @@ with st.sidebar:
                 else:
                     st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}` · `{r.get('timestamp_sec', '')}s`")
 
+        # [P10] Quick Select buttons
+        col_s1, col_s5, col_clr = st.columns(3)
+        with col_s1:
+            if st.button("⚡ Top 1", use_container_width=True, help="Chọn nhanh kết quả #1"):
+                if st.session_state.last_results:
+                    item = st.session_state.last_results[0]
+                    k = (item["video_id"], item["frame_idx"])
+                    st.session_state.selected[k] = item.copy()
+                    st.rerun()
+        with col_s5:
+            if st.button("⚡ Top 5", use_container_width=True, help="Chọn nhanh kết quả #1-5"):
+                for item in st.session_state.last_results[:5]:
+                    k = (item["video_id"], item["frame_idx"])
+                    st.session_state.selected[k] = item.copy()
+                st.rerun()
+        with col_clr:
+            if st.button("🗑️ Xóa hết", use_container_width=True):
+                st.session_state.selected = {}
+                st.rerun()
+        
         st.download_button(
             label="⬇️ Tải JSON (AIC format)",
             data=json.dumps(records, ensure_ascii=False, indent=2),
@@ -145,13 +170,11 @@ with st.sidebar:
         # Quy chế BTC: Nộp tối đa 100 kết quả
         for r in records[:100]:
             if st.session_state.query_type == "trake":
-                # Escape array if written to CSV
                 frame_ids_str = str(r['frame_ids']).replace('"', '""')
                 csv_lines.append(f"{r['video_id']},\"{frame_ids_str}\"")
             else:
                 line = f"{r['video_id']},{r['frame_idx']},{r.get('timestamp_sec', '')},{r.get('keyframe_path', '')}"
                 if st.session_state.query_type == "qa":
-                    # Escape dấu phẩy trong answer
                     ans = str(r.get('answer', '')).replace('"', '""')
                     line += f',"{ans}"'
                 csv_lines.append(line)
@@ -163,9 +186,17 @@ with st.sidebar:
             mime="text/csv",
             use_container_width=True,
         )
-        if st.button("🗑️ Xóa tất cả đã chọn", use_container_width=True):
-            st.session_state.selected = {}
-            st.rerun()
+        
+        # [P10] Xóa từng item riêng lẻ
+        st.markdown("**Xóa từng ảnh khỏi danh sách:**")
+        for r in records:
+            vid = r['video_id']
+            fidx = r.get('frame_idx', '')
+            label = f"`{vid}` · #{fidx}"
+            skey = next((k for k in st.session_state.selected if k[0]==vid and k[1]==fidx), None)
+            if skey and st.button(f"❌ {label}", key=f"del_{vid}_{fidx}", use_container_width=True):
+                del st.session_state.selected[skey]
+                st.rerun()
 
     st.divider()
     with st.expander("ℹ️ Hướng dẫn build index"):
@@ -201,7 +232,7 @@ if search_clicked and query.strip():
             
             if q_type == "trake":
                 st.info("🔄 Đang xử lý truy vấn TRAKE (Tìm chuỗi sự kiện)...")
-                sequences = trake_module.search_trake_sequence(query, top_k_per_event=100, time_window_sec=60)
+                sequences = trake_module.search_trake_sequence(query, top_k_per_event=300, time_window_sec=60)
                 
                 flat_results = []
                 for seq in sequences:
@@ -216,7 +247,8 @@ if search_clicked and query.strip():
             else:
                 search_q = qa_module.remove_qa_keywords(query) if q_type == "qa" else query
                 fused, reranked, verified = search_utils.full_search(
-                    search_q, fusion_method=fusion_method, do_verify=do_verify
+                    search_q, fusion_method=fusion_method, do_verify=do_verify,
+                    use_expansion=use_expansion
                 )
                 st.session_state.last_results = (
                     (verified if verified is not None else reranked)[:top_k_display]

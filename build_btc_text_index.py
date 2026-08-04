@@ -31,6 +31,10 @@ def build_btc_text_records():
     print("[1] Xây dựng text records từ dữ liệu BTC...")
     records = []
     
+    kf_map = {}
+    if os.path.exists(config.BTC_KF_META_CACHE):
+        kf_map = load_json(config.BTC_KF_META_CACHE)
+    
     # 1. Load Metadata (Video-level)
     if os.path.exists(config.BTC_MEDIA_INFO_CACHE):
         media_info = load_json(config.BTC_MEDIA_INFO_CACHE)
@@ -57,8 +61,7 @@ def build_btc_text_records():
     # 2. Load Objects (Frame-level)
     # Cấu trúc: data/btc/objects/objects/<video_id>/001.json, 002.json...
     objects_dir = os.path.join(config.BTC_DIR, "objects", "objects")
-    if os.path.exists(objects_dir) and os.path.exists(config.BTC_KF_META_CACHE):
-        kf_map = load_json(config.BTC_KF_META_CACHE)
+    if os.path.exists(objects_dir) and kf_map:
         obj_count = 0
         for video_id, frames in tqdm(kf_map.items(), desc="Đọc object labels"):
             video_obj_dir = os.path.join(objects_dir, video_id)
@@ -117,7 +120,7 @@ def build_btc_text_records():
                 
                 # Cần timestamp_sec. Lấy từ kf_map nếu có
                 timestamp_sec = 0.0
-                if "kf_map" in locals() and video_id in kf_map:
+                if video_id in kf_map:
                     for f in kf_map[video_id]:
                         if f["frame_idx"] == frame_idx:
                             timestamp_sec = f["timestamp_sec"]

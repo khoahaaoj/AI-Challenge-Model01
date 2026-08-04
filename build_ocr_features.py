@@ -17,9 +17,9 @@ def build_ocr_for_btc():
         print("❌ Chưa cài đặt easyocr. Vui lòng chạy: pip install easyocr")
         return
 
-    print(f"[OCR] Khởi tạo EasyOCR cho ngôn ngữ {config.OCR_LANGS} (chạy trên CPU để tránh tràn VRAM)...")
-    # Tắt GPU vì Streamlit (BGE-M3, SigLIP) đang chiếm dụng VRAM
-    reader = easyocr.Reader(config.OCR_LANGS, gpu=False)
+    print(f"[OCR] Khởi tạo EasyOCR cho ngôn ngữ {config.OCR_LANGS} (Đang bật GPU)...")
+    # Nếu bị lỗi CUDA Out of Memory, vui lòng tắt Streamlit app đi trước khi chạy OCR!
+    reader = easyocr.Reader(config.OCR_LANGS, gpu=True)
 
     if not os.path.exists(config.KEYFRAME_DIR):
         print(f"❌ Thư mục {config.KEYFRAME_DIR} không tồn tại. Vui lòng tải keyframes trước!")

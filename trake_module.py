@@ -67,7 +67,7 @@ def search_trake_sequence(query: str, top_k_per_event=500, time_window_sec=60):
     
     if len(sub_queries) <= 1:
         # Nếu chỉ có 1 sự kiện, fallback về search bình thường
-        fused, _, _ = search_utils.full_search(query)
+        fused, _, _ = search_utils.full_search(query, top_k=top_k_per_event, skip_rerank=True)
         # Chuyển về định dạng sequence để app.py dễ xử lý chung
         return [{
             "video_id": item["video_id"],
@@ -78,17 +78,21 @@ def search_trake_sequence(query: str, top_k_per_event=500, time_window_sec=60):
     # 1. Lấy kết quả độc lập cho từng sự kiện
     events_results = []
     for sq in sub_queries:
-        # Chỉ search bằng image_index (để nhanh) hoặc có thể gọi full_search
-        # Ở đây dùng search_image + text rồi merge tạm
-        fused, _, _ = search_utils.full_search(sq, fusion_method="rrf", do_verify=False)
-        events_results.append(fused[:top_k_per_event])
+        fused, _, _ = search_utils.full_search(sq, fusion_method="rrf", do_verify=False, top_k=top_k_per_event, skip_rerank=True)
+        events_results.append(fused)
         
-    # 2. Tìm video_id xuất hiện trong TẤT CẢ các sự kiện
-    video_sets = [set(item["video_id"] for item in results) for results in events_results]
-    common_videos = set.intersection(*video_sets) if video_sets else set()
+    # 2. Tìm video_id xuất hiện trong ít nhất N-1 sự kiện (soft-constraint)
+    from collections import Counter
+    vid_counts = Counter()
+    for results in events_results:
+        vid_counts.update(set(item["video_id"] for item in results))
+    
+    # Chỉ giữ các video thỏa ít nhất N-1 sự kiện
+    min_match = max(1, len(sub_queries) - 1)
+    common_videos = {vid for vid, count in vid_counts.items() if count >= min_match}
     
     if not common_videos:
-        print("[TRAKE] Không có video nào chứa đầy đủ tất cả sự kiện.")
+        print("[TRAKE] Không có video nào chứa đủ sự kiện.")
         return []
 
     # 3. Group by video_id
@@ -102,34 +106,40 @@ def search_trake_sequence(query: str, top_k_per_event=500, time_window_sec=60):
     # 4. Tìm chuỗi thỏa mãn thứ tự thời gian
     valid_sequences = []
     for vid, items in grouped_events.items():
-        # Lấy tất cả frame của sự kiện 0
+        # Lấy tất cả frame của sự kiện 0 (nếu có, hoặc sự kiện 1 nếu sự kiện 0 bị miss)
         starts = [it for idx, it in items if idx == 0]
-        
+        if not starts:
+            # Nếu sự kiện đầu bị miss, thử bắt đầu từ sự kiện 1
+            starts = [it for idx, it in items if idx == 1]
+            start_idx = 1
+        else:
+            start_idx = 0
+            
         for start_item in starts:
             current_seq = [start_item]
             last_time = start_item["timestamp_sec"]
             is_valid = True
+            missed_events = 1 if start_idx == 1 else 0
             
-            # Tìm tiếp sự kiện 1, 2...
-            for target_e_idx in range(1, len(sub_queries)):
+            for target_e_idx in range(start_idx + 1, len(sub_queries)):
                 candidates = [it for idx, it in items if idx == target_e_idx]
-                # Điều kiện: Xảy ra SAU sự kiện trước (timestamp lớn hơn)
-                # và nằm trong cửa sổ thời gian (time_window_sec)
                 valid_nexts = [
                     c for c in candidates 
                     if 0 < (c["timestamp_sec"] - last_time) <= time_window_sec
                 ]
                 
                 if not valid_nexts:
-                    is_valid = False
-                    break
+                    missed_events += 1
+                    if missed_events > (len(sub_queries) - min_match):
+                        is_valid = False
+                        break
+                    continue
                     
-                # Lấy frame có điểm cao nhất trong số các frame thỏa mãn
                 best_next = max(valid_nexts, key=lambda x: x.get("fused_score", x.get("score", 0)))
                 current_seq.append(best_next)
                 last_time = best_next["timestamp_sec"]
                 
-            if is_valid:
+            if is_valid and len(current_seq) >= min_match:
                 total_score = sum(ev.get("fused_score", ev.get("score", 0)) for ev in current_seq)
                 valid_sequences.append({
                     "video_id": vid,

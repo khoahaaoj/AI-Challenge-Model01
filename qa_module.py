@@ -30,10 +30,10 @@ def detect_query_type(query: str) -> str:
         
     # 2. Kiểm tra Q&A (có câu hỏi)
     qa_keywords = [
-        "?", "bao nhiêu", "màu gì", "ai là", "là gì", "như thế nào", 
-        "ở đâu", "khi nào", "tên gì", "làm gì", "gì", "ai", "mấy"
+        "bao nhiêu", "màu gì", "ai là", "là gì", "như thế nào", 
+        "ở đâu", "khi nào", "tên gì", "làm gì"
     ]
-    if "?" in query or any(kw in q.split() for kw in qa_keywords):
+    if "?" in query or any(kw in q for kw in qa_keywords):
         return "qa"
         
     # Mặc định là KIS (Known-Item Search)

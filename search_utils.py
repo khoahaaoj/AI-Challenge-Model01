@@ -184,7 +184,8 @@ def _load_caption_cache():
 def _get_passage_for_candidate(c):
     """
     Lấy passage tốt nhất cho 1 candidate để đưa vào CrossEncoder.
-    Ưu tiên: matched_text > caption cache > chuỗi rỗng.
+    Ưu tiên: matched_text > caption cache > metadata tổng hợp > chuỗi rỗng.
+    [P2 Fix] Không bao giờ trả về chuỗi rỗng nếu còn thông tin nào đó.
     """
     text = (c.get("matched_text") or "").strip()
     if text and text != "Khung hình video":
@@ -197,7 +198,63 @@ def _get_passage_for_candidate(c):
         if caption and caption != "Khung hình video":
             return caption
 
-    return ""
+    # [P2] Fallback tổng hợp từ metadata: video_id + timestamp + text_source
+    parts = []
+    vid = c.get("video_id", "")
+    if vid:
+        parts.append(f"Video {vid}")
+    ts = c.get("timestamp_sec")
+    if ts is not None:
+        parts.append(f"at {ts:.1f}s")
+    src = c.get("text_source", "")
+    if src:
+        parts.append(f"source: {src}")
+    if parts:
+        return " | ".join(parts)
+
+    return "video keyframe"
+
+
+_query_expansion_cache: dict = {}
+
+def expand_query_with_gemini(query: str) -> list[str]:
+    """
+    [P9] Query Expansion: dùng Gemini sinh 2-3 cách diễn đạt khác nhau
+    cùng ý nghĩa với query gốc để tăng recall cho BM25 và BGE-M3.
+    Trả về list gồm query gốc + các bản mở rộng.
+    Có cache để không gọi API nhiều lần cho cùng 1 query.
+    """
+    if not config.GEMINI_API_KEY:
+        return [query]
+    if query in _query_expansion_cache:
+        return _query_expansion_cache[query]
+
+    try:
+        model = get_gemini_model()
+        prompt = (
+            f'You are a search query expansion expert for a Vietnamese video retrieval system.\n'
+            f'Given the search query below, generate 2 alternative Vietnamese phrasings that '
+            f'mean the same thing but use different words/synonyms.\n'
+            f'Query: "{query}"\n\n'
+            f'Output ONLY a valid JSON array of 2 strings (no markdown, no explanation).\n'
+            f'Example: ["alt phrasing 1", "alt phrasing 2"]'
+        )
+        response = model.generate_content(prompt)
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        import json as _json
+        expansions = _json.loads(raw)
+        if isinstance(expansions, list):
+            result = [query] + [e for e in expansions if isinstance(e, str) and e != query]
+            _query_expansion_cache[query] = result
+            print(f"[QueryExpansion] '{query}' → {result}")
+            return result
+    except Exception as e:
+        print(f"[QueryExpansion] Lỗi ({e}). Dùng query gốc.")
+
+    _query_expansion_cache[query] = [query]
+    return [query]
 
 
 def translate_query_for_clip(query):
@@ -528,13 +585,14 @@ def rerank(query, candidates, top_k=None):
     pairs = [[query, _get_passage_for_candidate(c)] for c in candidates]
     scores = reranker.compute_score(pairs, normalize=True)
 
-    if isinstance(scores, float):
-        scores = [scores]
+    fused_vals = [c.get("fused_score", 0.0) for c in candidates]
+    lo, hi = (min(fused_vals), max(fused_vals)) if fused_vals else (0, 1)
+    rng = (hi - lo) or 1e-6
 
     for c, s in zip(candidates, scores):
         c["rerank_score"] = float(s)
-        # Kết hợp điểm RRF (visual) và Reranker (text) để không loại bỏ ảnh thuần túy
-        c["final_score"] = c.get("fused_score", 0.0) + float(s) * 0.5
+        norm_fused = (c.get("fused_score", 0.0) - lo) / rng
+        c["final_score"] = 0.5 * norm_fused + 0.5 * float(s)
 
     return sorted(candidates, key=lambda c: c["final_score"], reverse=True)[:top_k]
 
@@ -561,12 +619,12 @@ def verify_with_gemini(query, candidates):
         'Respond with ONLY valid JSON, no markdown: {{"score": <0-10>}}'
     )
 
-    for c in candidates:
+    def _score_single(c):
         try:
             img_path = c.get("path", "")
             if not img_path or not os.path.exists(img_path):
                 c["verify_score"] = 0
-                continue
+                return
             image = Image.open(img_path).convert("RGB")
             response = model.generate_content([prompt_template.format(query=query), image])
             raw = (response.text or "").strip()
@@ -578,8 +636,13 @@ def verify_with_gemini(query, candidates):
                 score = int(digits[:2]) if digits else 0
             c["verify_score"] = max(0, min(10, score))
         except Exception as e:
-            print(f"[LỖI] Gemini verify lỗi ở {c['path']}: {e}")
+            print(f"[LỖI] Gemini verify lỗi ở {c.get('path', 'unknown')}: {e}")
             c["verify_score"] = None
+
+    import concurrent.futures
+    # Hạ max_workers xuống 3 để tránh bị Google chặn API (Rate Limit 15 req/min của bản Free)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor.map(_score_single, candidates)
 
     def sort_key(c):
         has_verify = c.get("verify_score") is not None
@@ -591,18 +654,15 @@ def verify_with_gemini(query, candidates):
 # =================================================================
 # HÀM TỔNG HỢP
 # =================================================================
-def full_search(query, fusion_method=None, do_verify=False):
+def full_search(query, fusion_method=None, do_verify=False, top_k=None, skip_rerank=False, use_expansion=False):
     """
     Chạy toàn bộ pipeline: search_image + search_text + search_bm25
     → fusion → rerank → (tuỳ chọn) verify.
-
-    FIX query tiếng Việt không dấu: dịch 1 lần, dùng chung cho SigLIP2 và BGE-M3.
-    BM25 giữ query gốc (exact keyword match).
-    CrossEncoder dùng query gốc (multilingual).
-
-    Returns: (fused, reranked, verified)
+    
+    use_expansion=True: Bật Query Expansion (P9) cho BM25 để tăng Recall.
     """
     fusion_method = fusion_method or config.FUSION_METHOD
+    top_k = top_k or config.TOP_K_RETRIEVE
 
     # Dịch 1 lần duy nhất, dùng chung cho cả SigLIP2 và BGE-M3
     lang = detect_language(query)
@@ -613,17 +673,36 @@ def full_search(query, fusion_method=None, do_verify=False):
         translated_query = query
 
     # Nhánh ảnh: dùng bản đã dịch (tránh gọi API lần 2)
-    image_results = search_image(query, top_k=config.TOP_K_RETRIEVE, _pre_translated=translated_query)
+    image_results = search_image(query, top_k=top_k, _pre_translated=translated_query)
     # Nhánh text dense: dùng bản đã dịch (BGE-M3 hiểu tiếng Anh tốt hơn Việt không dấu)
-    text_results = search_text(translated_query, top_k=config.TOP_K_RETRIEVE)
-    # Nhánh BM25: giữ query gốc (exact-match tên riêng, số liệu)
-    bm25_results = search_bm25(query, top_k=config.TOP_K_RETRIEVE)
+    text_results = search_text(translated_query, top_k=top_k)
+    
+    # [P9] Query Expansion cho BM25 (exact keyword matching hưởng lợi nhiều nhất)
+    if use_expansion:
+        expanded_queries = expand_query_with_gemini(query)
+    else:
+        expanded_queries = [query]
+    
+    all_bm25 = []
+    for eq in expanded_queries:
+        partial = search_bm25(eq, top_k=top_k // len(expanded_queries) + 10)
+        all_bm25.extend(partial)
+    # Dedup theo (video_id, frame_idx), giữ điểm cao nhất
+    bm25_seen = {}
+    for r in all_bm25:
+        k = (r["video_id"], r["frame_idx"])
+        if k not in bm25_seen or r["score"] > bm25_seen[k]["score"]:
+            bm25_seen[k] = r
+    bm25_results = sorted(bm25_seen.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 
     if fusion_method == "rrf":
         fused = fuse_rrf(image_results, text_results, bm25_results=bm25_results,
-                         top_k=config.TOP_K_RETRIEVE)
+                         top_k=top_k)
     else:
-        fused = fuse_weighted(image_results, text_results, top_k=config.TOP_K_RETRIEVE)
+        fused = fuse_weighted(image_results, text_results, top_k=top_k)
+
+    if skip_rerank:
+        return fused, fused, None
 
     # CrossEncoder: query gốc (multilingual, hiểu tiếng Việt có dấu + tiếng Anh)
     reranked = rerank(query, fused, top_k=config.TOP_K_RERANK)
