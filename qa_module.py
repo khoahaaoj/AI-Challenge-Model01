@@ -23,7 +23,8 @@ def detect_query_type(query: str) -> str:
     # 1. Kiểm tra TRAKE (chuỗi sự kiện)
     trake_keywords = [
         "khoảnh khắc", "giai đoạn", "bước", "thứ tự", "lần lượt", 
-        "trước khi", "sau khi", "chuỗi", "diễn biến", "tiếp theo", "liên tiếp"
+        "trước khi", "sau khi", "chuỗi", "diễn biến", "tiếp theo", "liên tiếp",
+        "sau đó", "rồi", ", rồi", "rồi đến"
     ]
     if any(kw in q for kw in trake_keywords):
         return "trake"

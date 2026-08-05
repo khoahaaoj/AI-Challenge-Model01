@@ -57,6 +57,9 @@ from tokenizer_utils import detect_language, get_tokenizer
 _clip_model = None
 _clip_tokenizer = None
 _clip_preprocess = None
+_siglip_model = None
+_siglip_preprocess = None
+_siglip_tokenizer = None
 _bge_model = None
 _reranker_model = None
 _gemini_model = None
@@ -65,10 +68,16 @@ _nllb_pipeline = None
 
 _image_index = None
 _image_id_map = None
+_siglip_index = None
+_siglip_id_map = None
 _text_index = None
 _text_id_map = None
 _keyframe_meta = None
 _caption_cache = None
+
+# Paths SigLIP2 index (defined here to avoid circular import)
+_SIGLIP_INDEX_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index", "siglip_image_index.faiss")
+_SIGLIP_ID_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index", "siglip_image_id_map.json")
 
 
 def _load_json(path):
@@ -78,7 +87,7 @@ def _load_json(path):
 
 def load_indices():
     """Load FAISS index + id_map + keyframe_meta vào bộ nhớ (chỉ chạy thật sự 1 lần)."""
-    global _image_index, _image_id_map, _text_index, _text_id_map, _keyframe_meta
+    global _image_index, _image_id_map, _siglip_index, _siglip_id_map, _text_index, _text_id_map, _keyframe_meta
 
     if _image_index is None:
         if not os.path.exists(config.IMAGE_INDEX_PATH):
@@ -87,6 +96,13 @@ def load_indices():
             )
         _image_index = faiss.read_index(config.IMAGE_INDEX_PATH)
         _image_id_map = _load_json(config.IMAGE_ID_MAP_PATH)
+
+    # SigLIP2 index — tự động load nếu đã build
+    if _siglip_index is None and os.path.exists(_SIGLIP_INDEX_PATH):
+        print("[Search] SigLIP2 index detected — loading...")
+        _siglip_index = faiss.read_index(_SIGLIP_INDEX_PATH)
+        _siglip_id_map = _load_json(_SIGLIP_ID_MAP_PATH)
+        print(f"[Search] SigLIP2 index: {_siglip_index.ntotal:,} vectors (dim={_siglip_index.d})")
 
     if _text_index is None and os.path.exists(config.TEXT_INDEX_PATH):
         _text_index = faiss.read_index(config.TEXT_INDEX_PATH)
@@ -119,6 +135,20 @@ def get_clip_model():
         _clip_preprocess = preprocess
         _clip_tokenizer = open_clip.get_tokenizer(config.CLIP_MODEL_NAME)
     return _clip_model, _clip_tokenizer
+
+
+def get_siglip_model():
+    """Load SigLIP2-SO400M model (chỉ khi index đã tồn tại)."""
+    global _siglip_model, _siglip_preprocess, _siglip_tokenizer
+    if _siglip_model is None:
+        import open_clip
+        MODEL_NAME = "hf-hub:timm/ViT-SO400M-14-SigLIP2-384"
+        print(f"[SigLIP2] Load model cho query encoding...")
+        _siglip_model, _siglip_preprocess = open_clip.create_model_from_pretrained(MODEL_NAME)
+        _siglip_model = _siglip_model.to(config.DEVICE).eval()
+        _siglip_tokenizer = open_clip.get_tokenizer(MODEL_NAME)
+        print("[SigLIP2] Model ready.")
+    return _siglip_model, _siglip_tokenizer
 
 
 def get_bge_model():
@@ -346,6 +376,45 @@ def search_image(query, top_k=None, _pre_translated=None):
     return results
 
 
+def search_siglip(query, top_k=None, _pre_translated=None):
+    """
+    [SigLIP2] Encode query bằng SigLIP2-SO400M text encoder → search SigLIP2 FAISS Index.
+    Chỉ chạy nếu index đã được build (build_siglip_index.py).
+    """
+    load_indices()
+    if _siglip_index is None:
+        return []  # Index chưa build → bỏ qua nhánh này
+
+    top_k = top_k or config.TOP_K_RETRIEVE
+    model, tokenizer = get_siglip_model()
+
+    clip_query = _pre_translated if _pre_translated is not None else translate_query_for_clip(query)
+
+    with torch.no_grad():
+        tokens = tokenizer([clip_query]).to(config.DEVICE)
+        feat = model.encode_text(tokens)
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+        vec = feat.cpu().numpy().astype("float32")
+
+    scores, idxs = _siglip_index.search(vec, top_k)
+    results = []
+    for score, idx in zip(scores[0], idxs[0]):
+        if idx == -1:
+            continue
+        meta = _siglip_id_map[idx]
+        img_path = meta.get("path", "")
+        if not img_path:
+            img_path = _get_btc_image_path(meta["video_id"], meta["frame_idx"])
+        results.append({
+            "video_id":      meta["video_id"],
+            "frame_idx":     meta["frame_idx"],
+            "timestamp_sec": meta["timestamp_sec"],
+            "path":          img_path,
+            "score":         float(score),
+        })
+    return results
+
+
 # =================================================================
 # 2) SEARCH TEXT: BGE-M3 -> FAISS Text Index
 # =================================================================
@@ -502,29 +571,39 @@ def _key(item):
     return (item["video_id"], item["frame_idx"])
 
 
-def fuse_rrf(image_results, text_results, bm25_results=None, k=None, top_k=None):
-    """Reciprocal Rank Fusion (RRF) cho 3 nhánh: CLIP + BGE-M3 + BM25."""
+def fuse_rrf(image_results, text_results, bm25_results=None, siglip_results=None, k=None, top_k=None):
+    """
+    Reciprocal Rank Fusion (RRF) cho 4 nhánh: CLIP + SigLIP2 + BGE-M3 + BM25.
+    SigLIP2 chỉ được dùng nếu siglip_results không rỗng (index đã build).
+    """
     k = k or config.RRF_K
     top_k = top_k or config.TOP_K_RETRIEVE
 
     rrf_scores = {}
     item_cache = {}
 
+    # CLIP ViT-B/32 (BTC) — weight 3.0
     for rank, item in enumerate(image_results):
         key = _key(item)
-        # Trọng số x3 cho Image để tránh bị OCR đè bẹp
         rrf_scores[key] = rrf_scores.get(key, 0.0) + 3.0 / (k + rank + 1)
         item_cache.setdefault(key, item)
 
+    # SigLIP2-SO400M (self-encoded) — weight 2.5 (chất lượng cao hơn CLIP ViT-B/32)
+    for rank, item in enumerate(siglip_results or []):
+        key = _key(item)
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 2.5 / (k + rank + 1)
+        item_cache.setdefault(key, item)
+
+    # BGE-M3 text — weight 1.0
     for rank, item in enumerate(text_results):
         key = _key(item)
         rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
 
+    # BM25 sparse — weight 0.5
     for rank, item in enumerate(bm25_results or []):
         key = _key(item)
-        # Trọng số x0.5 cho BM25 vì hay bị dính từ khóa nhiễu trong OCR/News Ticker
         rrf_scores[key] = rrf_scores.get(key, 0.0) + 0.5 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
@@ -706,9 +785,14 @@ def full_search(query, fusion_method=None, do_verify=False, top_k=None, skip_rer
             bm25_seen[k] = r
     bm25_results = sorted(bm25_seen.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 
+    # [SigLIP2] Nhánh thứ 4 — tự động bỏ qua nếu chưa build index
+    siglip_results = search_siglip(query, top_k=top_k, _pre_translated=translated_query)
+    if siglip_results:
+        print(f"[full_search] SigLIP2: {len(siglip_results)} kết quả")
+
     if fusion_method == "rrf":
         fused = fuse_rrf(image_results, text_results, bm25_results=bm25_results,
-                         top_k=top_k)
+                         siglip_results=siglip_results, top_k=top_k)
     else:
         fused = fuse_weighted(image_results, text_results, top_k=top_k)
 

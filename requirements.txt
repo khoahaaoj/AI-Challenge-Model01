@@ -1,63 +1,48 @@
-# ==== Deep Learning core ====
-# Cài torch theo đúng bản CUDA của máy bạn TRƯỚC (xem https://pytorch.org/get-started/locally/),
-# ví dụ máy có CUDA 12.1:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
-# rồi mới cài các package còn lại trong file này.
-torch
-torchvision
+# ==============================================================================
+# AI Challenge 2026 - Multimodal Video Retrieval System Requirements
+# ==============================================================================
+#
+# LƯU Ý KHI CÀI ĐẶT:
+# 1. PyTorch & CUDA: Nên cài đặt torch/torchvision theo đúng bản CUDA của hệ thống TRƯỚC:
+#    (Ví dụ CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121)
+# 2. FAISS: faiss-cpu được mặc định để cài đặt ổn định trên mọi môi trường.
+#    Nếu máy có GPU và muốn tăng tốc build index, có thể cài faiss-gpu (khuyên dùng conda: conda install -c pytorch faiss-gpu)
 
-# ==== Tách cảnh + đọc video ====
-scenedetect[opencv]
-opencv-python
+# ==== Deep Learning & Multi-Modal Frameworks ====
+torch>=2.0.0
+torchvision>=0.15.0
+open_clip_torch>=2.24.0
 
-# ==== Speech-to-Text (Whisper, đa ngôn ngữ, hỗ trợ tiếng Việt) ====
-faster-whisper
+# ==== Text Embedding & Cross-Encoder Reranking ====
+FlagEmbedding>=1.2.0
+transformers>=4.36.0
+sentencepiece>=0.1.99
 
-# ==== CLIP (image encoder) ====
-open_clip_torch
+# ==== Vector & Sparse Search ====
+faiss-cpu>=1.7.4
+rank-bm25>=0.2.2
 
-# ==== OCR (đọc chữ vi + en trong ảnh) ====
-easyocr
+# ==== OCR (Optical Character Recognition) & Image Processing ====
+easyocr>=1.7.0
+opencv-python>=4.8.0
+scenedetect[opencv]>=0.6.2
+Pillow>=10.0.0
 
-# ==== BGE-M3 (text embedding) + bge-reranker-v2-m3 (CrossEncoder rerank) ====
-FlagEmbedding
+# ==== NLP & Tokenization ====
+langid>=1.1.6
+underthesea>=6.8.0
 
-# ==== Vector search ====
-# faiss-gpu qua pip khá bấp bênh (thường phải cài qua conda: `conda install -c pytorch faiss-gpu`).
-# faiss-cpu vẫn đủ nhanh cho việc SEARCH (bottleneck chính nằm ở bước ENCODE bằng GPU, không phải
-# bước search FAISS), nên mặc định dùng faiss-cpu cho chắc, nếu môi trường có conda + GPU rảnh thì
-# đổi sang faiss-gpu để tăng tốc thêm bước build index.
-faiss-cpu
+# ==== Generative AI / VLM API ====
+google-generativeai>=0.4.0
 
-# ==== Gemini API (caption + verify) ====
-google-generativeai
+# ==== Web Dashboard UI ====
+streamlit>=1.30.0
 
-# ==== UI ====
-streamlit
+# ==== Speech-to-Text & Audio Processing ====
+faster-whisper>=1.0.0
 
-# ==== BM25 sparse retrieval ====
-rank-bm25
-
-# ==== Tiện ích ====
-Pillow
-numpy
-tqdm
-python-dotenv
-
-# ==== Language detection (local, không cần API) ====
-# Dùng để phát hiện tiếng Việt vs tiếng Anh trước khi dịch query cho SigLIP2.
-# Thay thế heuristic isascii() bị lỗi với tiếng Việt không dấu.
-# (xem tokenizer_utils.py::detect_language và AIC2026_Deep_Audit_Report.md mục 3.9)
-langid
-
-# ==== NLLB-200 local translation fallback ====
-# Dùng để dịch query Vi→En khi Gemini API lỗi hoặc mất mạng lúc thi đấu.
-# transformers đã có sẵn (FlagEmbedding dependency), sentencepiece cần thêm.
-# Model facebook/nllb-200-distilled-600M sẽ tự download (~2.4GB) lần đầu chạy.
-sentencepiece
-
-# ==== Vietnamese word tokenizer (TÙY CHỌN, cải thiện BM25 với từ ghép) ====
-# Giúp BM25 tách đúng "thủ tướng" thành 1 token thay vì 2 token riêng.
-# QUAN TRỌNG: nếu cài thì phải build lại BM25 index (xóa index/bm25_index.pkl).
-# Lý do: tokenizer build-time và search-time phải GIỐNG NHAU (đã fix trong code).
-# underthesea  # bỏ comment để cài: pip install underthesea
+# ==== System & Environment Utilities ====
+numpy>=1.24.0
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+requests>=2.31.0

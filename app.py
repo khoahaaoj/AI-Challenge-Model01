@@ -139,16 +139,21 @@ with st.sidebar:
                     item = st.session_state.last_results[0]
                     k = (item["video_id"], item["frame_idx"])
                     st.session_state.selected[k] = item.copy()
+                    st.session_state[f"chk_{item['video_id']}_{item['frame_idx']}"] = True
                     st.rerun()
         with col_s5:
             if st.button("⚡ Top 5", use_container_width=True, help="Chọn nhanh kết quả #1-5"):
                 for item in st.session_state.last_results[:5]:
                     k = (item["video_id"], item["frame_idx"])
                     st.session_state.selected[k] = item.copy()
+                    st.session_state[f"chk_{item['video_id']}_{item['frame_idx']}"] = True
                 st.rerun()
         with col_clr:
             if st.button("🗑️ Xóa hết", use_container_width=True):
                 st.session_state.selected = {}
+                for key in list(st.session_state.keys()):
+                    if key.startswith("chk_"):
+                        del st.session_state[key]
                 st.rerun()
         
         st.download_button(
@@ -196,6 +201,8 @@ with st.sidebar:
             skey = next((k for k in st.session_state.selected if k[0]==vid and k[1]==fidx), None)
             if skey and st.button(f"❌ {label}", key=f"del_{vid}_{fidx}", use_container_width=True):
                 del st.session_state.selected[skey]
+                if f"chk_{vid}_{fidx}" in st.session_state:
+                    st.session_state[f"chk_{vid}_{fidx}"] = False
                 st.rerun()
 
     st.divider()
