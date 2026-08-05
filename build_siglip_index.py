@@ -35,7 +35,8 @@ SIGLIP_INDEX_PATH  = os.path.join(config.INDEX_DIR, "siglip_image_index.faiss")
 SIGLIP_ID_MAP_PATH = os.path.join(config.INDEX_DIR, "siglip_image_id_map.json")
 SIGLIP_PARTIAL_PATH = os.path.join(config.INDEX_DIR, "siglip_partial.npz")  # checkpoint
 
-MODEL_NAME   = "hf-hub:timm/ViT-SO400M-14-SigLIP2-384"
+MODEL_NAME   = "ViT-SO400M-14-SigLIP2-378"
+PRETRAINED   = "webli"
 BATCH_SIZE   = 8    # an toàn với 4GB VRAM; tăng lên 16 nếu không bị OOM
 SAVE_EVERY   = 1000  # checkpoint mỗi N ảnh
 
@@ -45,7 +46,7 @@ def _load_siglip_model():
     import open_clip
     print(f"[SigLIP2] Load model: {MODEL_NAME}")
     print("[SigLIP2] Lần đầu sẽ tải ~3.5GB từ HuggingFace, sau đó cache tại ~/.cache/")
-    model, preprocess = open_clip.create_model_from_pretrained(MODEL_NAME)
+    model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED)
     model = model.to(config.DEVICE).eval()
     tokenizer = open_clip.get_tokenizer(MODEL_NAME)
     print(f"[SigLIP2] Model ready trên {config.DEVICE}")

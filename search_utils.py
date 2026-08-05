@@ -142,9 +142,10 @@ def get_siglip_model():
     global _siglip_model, _siglip_preprocess, _siglip_tokenizer
     if _siglip_model is None:
         import open_clip
-        MODEL_NAME = "hf-hub:timm/ViT-SO400M-14-SigLIP2-384"
+        MODEL_NAME = "ViT-SO400M-14-SigLIP2-378"
+        PRETRAINED = "webli"
         print(f"[SigLIP2] Load model cho query encoding...")
-        _siglip_model, _siglip_preprocess = open_clip.create_model_from_pretrained(MODEL_NAME)
+        _siglip_model, _, _siglip_preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED)
         _siglip_model = _siglip_model.to(config.DEVICE).eval()
         _siglip_tokenizer = open_clip.get_tokenizer(MODEL_NAME)
         print("[SigLIP2] Model ready.")
