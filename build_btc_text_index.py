@@ -69,25 +69,30 @@ def build_btc_text_records():
                 continue
             for i, frame in enumerate(frames):
                 frame_idx = frame["frame_idx"]
-                # BTC lưu file tên theo số thứ tự (1-based) với padding 3 chữ số: 001.json, 002.json
                 json_path = os.path.join(video_obj_dir, f"{i+1:03d}.json")
                 if not os.path.exists(json_path):
                     continue
                 try:
                     with open(json_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    # Format thực tế: {"detection_scores": ["0.9",...], "detection_class_entities": ["Person",...]}
                     scores = data.get("detection_scores", [])
                     entities = data.get("detection_class_entities", [])
                     
-                    classes = []
+                    # [IMPROVED] Hạ threshold xuống 0.2 để bắt được nhiều object hơn
+                    # Đếm số lượng từng class để tạo text phông phú hơn
+                    # (ví dụ: "Person Person Person Car" thìm BM25 và BGE-M3 hiểu "3 people 1 car")
+                    class_counter = {}
                     for score_str, entity in zip(scores, entities):
-                        if float(score_str) >= 0.3:
-                            classes.append(entity)
-                            
-                    if classes:
-                        # Lọc trùng và nối lại
-                        text = " ".join(set(classes))
+                        if float(score_str) >= 0.2:
+                            class_counter[entity] = class_counter.get(entity, 0) + 1
+                    
+                    if class_counter:
+                        # Tạo text theo format: "Person Person Car Motorcycle" (lặp theo count)
+                        # Để BM25 exact-match hoạt động tốt hơn với từng từ
+                        parts = []
+                        for entity, count in sorted(class_counter.items(), key=lambda x: -x[1]):
+                            parts.extend([entity] * min(count, 3))  # tối đa 3 lần mỗi class
+                        text = " ".join(parts)
                         records.append({
                             "text": text,
                             "source": "objects",
@@ -98,9 +103,10 @@ def build_btc_text_records():
                         obj_count += 1
                 except Exception as e:
                     pass
-        print(f"  + Đã thêm {obj_count} records từ Object Detection.")
+        print(f"  + Đã thêm {obj_count} records từ Object Detection (threshold=0.2, có count).")
     else:
         print("  - Không tìm thấy thư mục objects hoặc btc_keyframe_meta.json")
+
 
     # 3. Load OCR (Frame-level)
     if os.path.exists(config.OCR_CACHE):
