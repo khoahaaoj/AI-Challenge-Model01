@@ -1,84 +1,90 @@
+"""
+build_ocr_features.py
+======================
+OCR toàn bộ keyframe BTC → cache/ocr.json
+
+Dùng EasyOCR (vi+en) với GPU. Checkpoint tự động mỗi 500 ảnh.
+Nếu bị ngắt giữa chừng, chạy lại sẽ tiếp tục từ chỗ dở.
+
+Sau khi chạy xong, cần rebuild text index:
+    python build_btc_text_index.py
+"""
 import os
 import json
 import torch
 from tqdm import tqdm
-
 import config
 
+
 def build_ocr_for_btc():
-    """
-    Trích xuất OCR cho tất cả keyframes trong data/keyframes.
-    Sử dụng EasyOCR (nếu có cài đặt) hoặc báo lỗi.
-    Lưu kết quả vào cache/ocr.json.
-    """
     try:
         import easyocr
     except ImportError:
-        print("❌ Chưa cài đặt easyocr. Vui lòng chạy: pip install easyocr")
+        print("❌ Chưa cài easyocr. Chạy: pip install easyocr")
         return
-
-    print(f"[OCR] Khởi tạo EasyOCR cho ngôn ngữ {config.OCR_LANGS} (Đang bật GPU)...")
-    # Nếu bị lỗi CUDA Out of Memory, vui lòng tắt Streamlit app đi trước khi chạy OCR!
-    reader = easyocr.Reader(config.OCR_LANGS, gpu=True)
 
     if not os.path.exists(config.KEYFRAME_DIR):
-        print(f"❌ Thư mục {config.KEYFRAME_DIR} không tồn tại. Vui lòng tải keyframes trước!")
+        print(f"❌ Thư mục {config.KEYFRAME_DIR} không tồn tại. Tải keyframes trước!")
         return
 
-    ocr_cache_path = config.OCR_CACHE
-    if os.path.exists(ocr_cache_path):
-        with open(ocr_cache_path, "r", encoding="utf-8") as f:
+    # Load cache hiện có (checkpoint)
+    ocr_cache = {}
+    if os.path.exists(config.OCR_CACHE):
+        with open(config.OCR_CACHE, "r", encoding="utf-8") as f:
             ocr_cache = json.load(f)
-    else:
-        ocr_cache = {}
 
-    print("[OCR] Đang quét danh sách ảnh keyframe...")
-    all_image_paths = []
-    for root, dirs, files in os.walk(config.KEYFRAME_DIR):
-        for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                # Lưu đường dẫn tương đối (ví dụ: L10_V010/001.jpg) 
-                # hoặc tuyệt đối tùy nhu cầu, ở đây lưu tuyệt đối để dễ đọc
-                full_path = os.path.join(root, file)
-                all_image_paths.append(full_path)
+    # Tìm toàn bộ ảnh cần xử lý
+    print("[OCR] Đang quét danh sách keyframe...")
+    all_paths = []
+    for root, _, files in os.walk(config.KEYFRAME_DIR):
+        for file in sorted(files):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                all_paths.append(os.path.join(root, file))
 
-    print(f"[OCR] Tìm thấy {len(all_image_paths)} ảnh trong {config.KEYFRAME_DIR}.")
-    
-    pending_paths = [p for p in all_image_paths if p not in ocr_cache]
-    print(f"[OCR] Còn lại {len(pending_paths)} ảnh chưa được OCR.")
+    pending = [p for p in all_paths if p not in ocr_cache]
+    total = len(all_paths)
+    done = total - len(pending)
+    print(f"[OCR] Tổng: {total:,} ảnh | Đã xong: {done:,} | Còn lại: {len(pending):,}")
 
-    if not pending_paths:
+    if not pending:
         print("🎉 Đã hoàn thành OCR cho tất cả ảnh!")
         return
 
-    save_interval = 200
-    success_count = 0
+    # Khởi tạo EasyOCR — GPU nếu có
+    use_gpu = torch.cuda.is_available()
+    print(f"[OCR] Khởi tạo EasyOCR (langs={config.OCR_LANGS}, gpu={use_gpu})...")
+    print("[OCR] ⚠️  Nếu bị OOM: tắt Streamlit trước rồi chạy lại!\n")
+    reader = easyocr.Reader(config.OCR_LANGS, gpu=use_gpu)
 
-    for i, path in enumerate(tqdm(pending_paths, desc="OCR Keyframes")):
+    SAVE_EVERY = 500
+    success = 0
+
+    for i, path in enumerate(tqdm(pending, desc="[EasyOCR]")):
         try:
-            results = reader.readtext(path)
-            # results: list of (bbox, text, confidence)
-            # Lọc text có confidence > 0.3
+            results = reader.readtext(path, detail=1)
+            # Lọc theo confidence > 0.3
             texts = [res[1] for res in results if res[2] > 0.3]
-            ocr_text = " ".join(texts).strip()
-            
-            ocr_cache[path] = ocr_text
-            success_count += 1
+            ocr_cache[path] = " ".join(texts).strip()
+            success += 1
         except Exception as e:
-            print(f"Lỗi đọc {path}: {e}")
             ocr_cache[path] = ""
 
-        # Lưu lại đều đặn để tránh mất dữ liệu khi bị ngắt
-        if (i + 1) % save_interval == 0:
-            with open(ocr_cache_path, "w", encoding="utf-8") as f:
-                json.dump(ocr_cache, f, ensure_ascii=False, indent=2)
+        # Checkpoint định kỳ
+        if (i + 1) % SAVE_EVERY == 0:
+            with open(config.OCR_CACHE, "w", encoding="utf-8") as f:
+                json.dump(ocr_cache, f, ensure_ascii=False)
+            tqdm.write(f"[OCR] ✅ Checkpoint: {len(ocr_cache):,} ảnh đã lưu")
 
     # Lưu lần cuối
-    with open(ocr_cache_path, "w", encoding="utf-8") as f:
-        json.dump(ocr_cache, f, ensure_ascii=False, indent=2)
-        
-    print(f"✅ Hoàn thành! Đã OCR thành công {success_count} ảnh.")
-    print(f"   Kết quả được lưu tại: {ocr_cache_path}")
+    with open(config.OCR_CACHE, "w", encoding="utf-8") as f:
+        json.dump(ocr_cache, f, ensure_ascii=False)
+
+    has_text = sum(1 for v in ocr_cache.values() if v.strip())
+    print(f"\n✅ Hoàn thành! {success:,} ảnh mới | Có text: {has_text:,}/{len(ocr_cache):,}")
+    print(f"   → {config.OCR_CACHE}")
+    print("\n⚠️  Nhớ rebuild text index sau khi xong:")
+    print("   python build_btc_text_index.py")
+
 
 if __name__ == "__main__":
     build_ocr_for_btc()
