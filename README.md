@@ -24,59 +24,198 @@
 
 ## Kiến Trúc Pipeline
 
-Hệ thống dùng **dữ liệu chính thức do BTC cung cấp** (CLIP features ViT-B/32 + metadata YouTube + object detection) làm nguồn chính — không tự encode lại ảnh từ đầu, để đảm bảo `frame_idx` khớp tuyệt đối với ground truth khi chấm điểm.
+Hệ thống dùng **dữ liệu chính thức BTC** làm nguồn chính — không tự encode lại ảnh để đảm bảo `frame_idx` khớp tuyệt đối khi chấm điểm.
+
+---
 
 ### Giai đoạn 1 — Lập chỉ mục (chạy offline 1 lần)
 
 ```
-data/btc/ (BTC cung cấp)
-  ├─ map_keyframes/   (CSV: frame_idx, pts_time, fps)
-  ├─ media_info/      (JSON: title, description, keywords, author)
-  ├─ clip_features/   (.npy: CLIP ViT-B/32, dim=512 — đã trích sẵn)
-  └─ objects/         (JSON: Faster R-CNN detection — tuỳ chọn tải)
-        │
-        ▼
-  parse_btc_data.py
-  → cache/btc_keyframe_meta.json
-  → cache/btc_media_info.json
-  → index/btc_image_index.faiss  (KHÔNG re-encode ảnh)
-        │
-        ▼
-  build_ocr_features.py  (tuỳ chọn)
-  → cache/ocr.json  (EasyOCR vi+en quét từng keyframe)
-        │
-        ▼
-  build_btc_text_index.py
-  → Gộp: metadata YouTube + object detection + OCR
-  → index/btc_text_index.faiss   (BGE-M3, dim=1024)
-  → index/btc_bm25_index.pkl     (BM25 Okapi sparse)
+┌──────────────────── INPUT: data/btc/ (BTC cung cấp) ────────────────────┐
+│  map_keyframes/*.csv  → frame_idx, pts_time, fps cho từng video          │
+│  media_info/*.json    → title, description, keywords, author (YouTube)  │
+│  clip_features/*.npy  → vector CLIP ViT-B/32 dim=512, 1 file/video      │
+│  objects/*/*.json     → Faster R-CNN: class_entities + scores/frame     │
+│  keyframes/<vid>/*.jpg → ảnh .jpg từng keyframe (để hiển thị + OCR)    │
+└─────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  parse_btc_data.py
+┌──────────────────── NHÁNH ẢNH ──────────────────────────────────────────┐
+│  .npy CLIP features (dim=512) của BTC                                   │
+│    → L2-normalize → FAISS IndexFlatIP (cosine sim = inner product)      │
+│    → index/btc_image_index.faiss  +  btc_image_id_map.json             │
+│                                                                          │
+│  ⚠️  KHÔNG re-encode lại ảnh — dùng thẳng vector BTC đã trích sẵn      │
+│     → frame_idx khớp tuyệt đối ground truth, không bị lệch 1 frame     │
+└─────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  build_ocr_features.py  (tuỳ chọn, để máy qua đêm)
+┌──────────────────── OCR ────────────────────────────────────────────────┐
+│  EasyOCR (vi + en) quét từng ảnh keyframe                               │
+│    → đọc: biển hiệu, news ticker, phụ đề cứng, banner, số liệu         │
+│    → giữ text có confidence > 0.3 → nối thành chuỗi                   │
+│    → cache/ocr.json  {"/path/to/frame.jpg": "VTV1 18:30 HÀ NỘI"}      │
+│    → Checkpoint mỗi 500 ảnh (tiếp tục được nếu bị ngắt)               │
+└─────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  build_btc_text_index.py
+┌──────────────────── NHÁNH TEXT ─────────────────────────────────────────┐
+│  Gộp 3 nguồn text thành danh sách records:                              │
+│                                                                          │
+│  [1] YouTube Metadata (video-level, 873 records):                       │
+│      "title + description[:500] + keywords + author"                    │
+│      → đại diện CHỦ ĐỀ, nhân vật, sự kiện chính của video              │
+│                                                                          │
+│  [2] Object Detection (frame-level, ~171k records):                     │
+│      Đọc objects/*.json của BTC (Faster R-CNN)                          │
+│      → threshold 0.2, đếm số lượng → "Person Person Car Building"      │
+│      → đại diện NỘI DUNG TRỰC QUAN trong từng keyframe                 │
+│                                                                          │
+│  [3] OCR (frame-level, ~4k+ records nếu đã chạy OCR):                  │
+│      Text thật đọc được trong ảnh (news ticker, tên người, số...)       │
+│      → đại diện TEXT XUẤT HIỆN trong khung hình                        │
+│                                                                          │
+│      ↓ Tổng: 177k records                                               │
+│  BGE-M3 (FlagEmbedding, đa ngôn ngữ vi+en, dim=1024, chạy CPU)         │
+│    → encode tất cả → FAISS IndexFlatIP                                  │
+│    → index/btc_text_index.faiss  +  btc_text_id_map.json               │
+│                                                                          │
+│  BM25 Okapi (rank-bm25, tokenizer underthesea nếu đã cài)              │
+│    → same records → sparse keyword index                                │
+│    → index/btc_bm25_index.pkl                                           │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Giai đoạn 2 — Tìm kiếm (real-time trên Streamlit)
+---
+
+### Giai đoạn 2 — Tìm kiếm (real-time, Streamlit)
 
 ```
-QUERY (vi/en)
+QUERY (tiếng Việt hoặc tiếng Anh)
   │
-  ├─[1] langid.classify() — phát hiện ngôn ngữ (local)
-  │       └─ Nếu không phải "en" → dịch 1 lần, dùng chung 2 nhánh dưới:
-  │            Gemini API (ưu tiên) → NLLB-200-600M local (fallback offline)
+  ▼  langid.classify()  — phát hiện ngôn ngữ (local, <1ms)
   │
-  ├─[Ảnh]  CLIP ViT-B/32 text encoder (GPU) → FAISS Image Index → Top-100
-  ├─[Text] BGE-M3 dense (CPU)              → FAISS Text Index  → Top-100
-  └─[BM25] Query Expansion (Gemini, tuỳ chọn) → BM25 Okapi     → Top-100
-                │
-                ▼
-    RRF Fusion (k=60, trọng số Ảnh×3 / Text×1 / BM25×0.5)
-                │
-                ▼
-    CrossEncoder bge-reranker-v2-m3 (GPU fp16)
-    final_score = 0.5×norm_fused + 0.5×rerank_score
-                │
-                ▼ (tuỳ chọn)
-    Gemini VLM Verify — chấm điểm 0–10 theo rubric, 10 luồng song song
-```
+  ├── Nếu tiếng Anh → dùng thẳng
+  └── Nếu tiếng Việt → DỊCH 1 LẦN, dùng chung cho nhánh Ảnh + Text:
+        [1] Gemini API (gemini-3.5-flash-lite, ~0.5s)  ← ưu tiên
+        [2] NLLB-200-distilled-600M local (~2s, CPU)   ← fallback offline
+        [3] Query gốc + cảnh báo                        ← nếu cả 2 lỗi
 
-**TRAKE** (chuỗi sự kiện): tách query thành N sự kiện con (Gemini/heuristic) → search từng sự kiện độc lập (`skip_rerank=True`, `top_k=300`) → ghép chuỗi theo ràng buộc thời gian tăng dần → soft-constraint (chấp nhận miss 1 sự kiện).
+
+════════════ 3 NHÁNH TÌM KIẾM CHẠY SONG SONG ════════════
+
+┌─────────────────────────────────────────────────────────┐
+│  NHÁNH ẢNH — Semantic Image Search                      │
+│                                                         │
+│  Input : query đã dịch sang tiếng Anh                  │
+│  Model : CLIP ViT-B/32 text encoder  (GPU, ~10ms)      │
+│    → encode query → vector dim=512                     │
+│    → FAISS cosine similarity với 177k keyframe vectors  │
+│  Output: Top-100 keyframes (sorted by cosine sim)      │
+│                                                         │
+│  Strengths : hiểu NGỮ NGHĨA hình ảnh                   │
+│  Weakness  : không nhận diện tên riêng, số, text nhỏ  │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  NHÁNH TEXT — Semantic Text Search                      │
+│                                                         │
+│  Input : query GỐC (vi/en, không dịch — BGE-M3 đa ng)  │
+│  Model : BGE-M3 FlagModel  (CPU, tiết kiệm VRAM)       │
+│    → encode query → vector dim=1024                    │
+│    → FAISS cosine sim với 177k text records             │
+│      (metadata + object labels + OCR text)             │
+│  Output: Top-100 records → map về keyframe (frame_idx) │
+│                                                         │
+│  Strengths : hiểu tiếng Việt, tên người, địa danh      │
+│  Weakness  : phụ thuộc chất lượng text trong index     │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  NHÁNH BM25 — Sparse Keyword Search                     │
+│                                                         │
+│  Input : query gốc (vi/en)                             │
+│          + Query Expansion nếu bật checkbox:           │
+│            Gemini sinh 2 câu đồng nghĩa → search 3 lần │
+│            kết quả merge, cached để không gọi API lại  │
+│  Model : BM25 Okapi (rank-bm25, CPU, <100ms)           │
+│    → tokenize (underthesea hoặc str.split())           │
+│    → TF-IDF weighted exact keyword match               │
+│  Output: Top-100 records theo BM25 score               │
+│                                                         │
+│  Strengths : exact match tên riêng, số liệu, địa danh  │
+│  Weakness  : không hiểu synonym, ngữ nghĩa             │
+└─────────────────────────────────────────────────────────┘
+
+
+════════════ FUSION & RERANKING ════════════
+
+  ▼  RRF Fusion  (Reciprocal Rank Fusion, k=60)
+  ┌────────────────────────────────────────────────────────┐
+  │  score(frame) = Σᵢ  weightᵢ / (k + rankᵢ(frame))     │
+  │  Trọng số: Ảnh × 3.0  /  Text × 1.0  /  BM25 × 0.5  │
+  │  → Ảnh được ưu tiên vì dataset AIC visual-heavy       │
+  │  → Khử trùng: cùng video_id + frame_idx → giữ cao    │
+  │  → Output: Top-100 candidates hợp nhất                │
+  └────────────────────────────────────────────────────────┘
+         │
+         ▼  CrossEncoder Reranker
+  ┌────────────────────────────────────────────────────────┐
+  │  Model: bge-reranker-v2-m3  (GPU fp16, ~1.1GB VRAM)  │
+  │  Input: cặp (query, passage) cho mỗi candidate        │
+  │  Passage = (theo thứ tự ưu tiên):                     │
+  │    caption cache → OCR text → object labels           │
+  │    → fallback: "Video L22_V001 | at 120.5s"          │
+  │    (không bao giờ để passage rỗng → reranker vô nghĩa)│
+  │  → Chấm relevance score, sigmoid normalize 0–1        │
+  │                                                        │
+  │  final_score = 0.5 × norm_fused + 0.5 × rerank_score │
+  │  → Sort lại Top-100 theo final_score                  │
+  └────────────────────────────────────────────────────────┘
+         │
+         ▼  (tuỳ chọn — bật checkbox "Gemini VLM Verify")
+  ┌────────────────────────────────────────────────────────┐
+  │  Gemini VLM Verify                                     │
+  │  Gửi ảnh thật (bytes) + query cho Gemini API          │
+  │  Rubric 0–10:                                          │
+  │    9-10 : Khớp hoàn toàn (đúng object + hành động)   │
+  │    6-8  : Khớp một phần (đúng object, sai context)    │
+  │    3-5  : Chủ đề liên quan nhưng sai nội dung         │
+  │    0-2  : Không liên quan                             │
+  │  Chạy 10 ảnh song song (ThreadPoolExecutor)           │
+  │  → Sort lại theo verify_score                         │
+  └────────────────────────────────────────────────────────┘
+         │
+         ▼
+  🖥️  Hiển thị Grid kết quả → Tick chọn → Export JSON/CSV
+
+
+════════════ TRAKE (chuỗi sự kiện theo thứ tự thời gian) ════════════
+
+  Query VD: "Người đàn ông cầm mic → sau đó bắt tay → cuối cùng vẫy tay"
+    │
+    ▼  trake_module.py
+  Tách thành N sự kiện con:
+    [A] "Người đàn ông cầm mic"
+    [B] "bắt tay"
+    [C] "vẫy tay"
+  (Gemini parse nếu có API key, fallback: cắt theo "rồi/sau đó/tiếp theo")
+    │
+    ▼
+  Search từng sự kiện độc lập (skip_rerank=True, top_k=300)
+    → Tập_A, Tập_B, Tập_C (mỗi tập là list {video_id, frame_idx, timestamp})
+    │
+    ▼
+  Giao video_id: chỉ giữ video xuất hiện trong TẤT CẢ các tập
+  (soft-constraint: chấp nhận miss 1 sự kiện nếu không có video đủ)
+    │
+    ▼
+  Ghép chuỗi: chọn tuple (f_A, f_B, f_C) sao cho
+    timestamp_A < timestamp_B < timestamp_C  (đúng thứ tự thời gian)
+    │
+    ▼
+  Output: {video_id, frame_ids: [f_A, f_B, f_C]}
+```
 
 ---
 
@@ -136,7 +275,7 @@ echo 'GEMINI_API_KEY=your-key-here' > .env
 # Bước 1 — Parse BTC data + build Image FAISS Index
 python3 parse_btc_data.py
 
-# Bước 2 — OCR toàn bộ keyframe (tuỳ chọn, ~5-10 tiếng với GPU, để máy chạy qua đêm)
+# Bước 2 — OCR toàn bộ keyframe (tuỳ chọn, để máy chạy qua đêm)
 python3 build_ocr_features.py
 
 # Bước 3 — Build Text Index (BGE-M3) + BM25 Index
