@@ -153,7 +153,8 @@ with st.sidebar:
                 st.session_state.selected = {}
                 for key in list(st.session_state.keys()):
                     if key.startswith("chk_"):
-                        del st.session_state[key]
+                        st.session_state[key] = False
+                # Không cần st.rerun() nếu ở đầu script, nhưng an toàn thì giữ
                 st.rerun()
         
         st.download_button(
@@ -404,9 +405,11 @@ if results:
                     elif s_key in st.session_state.selected:
                         del st.session_state.selected[s_key]
 
+                if chk_key not in st.session_state:
+                    st.session_state[chk_key] = is_selected
+                    
                 st.checkbox(
                     "✅ Chọn để nộp",
-                    value=is_selected,
                     key=chk_key,
                     on_change=toggle_selection,
                     args=(sel_key, item, chk_key)

@@ -6,6 +6,15 @@
 
 ---
 
+## 🌟 Cập Nhật Mới Nhất (06/08)
+
+*   **Tối ưu VRAM cực hạn (OOM Catcher)**: Ép nhánh `CLIP ViT-B/32` chạy CPU, ép `SigLIP2` và `Reranker` xuống `fp16`. Bổ sung cơ chế fallback tự động đẩy model sang CPU khi phát hiện `torch.cuda.OutOfMemoryError`.
+*   **Sửa lỗi UI Streamlit**: Khắc phục triệt để lỗi State Management của các checkbox chọn ảnh và nút "Xóa hết", "Top 1", "Top 5".
+*   **Làm việc nhóm từ xa**: Bổ sung cơ chế host app qua Cloudflare Tunnel để cả team cùng search chung một backend.
+*   **Synthetic Eval Queries**: Tự động sinh `eval_queries.json` từ Metadata để kiểm thử tự động điểm số Recall@K bằng `eval_retrieval.py`.
+
+---
+
 ## Mục Lục
 
 - [Kiến trúc pipeline](#kiến-trúc-pipeline)

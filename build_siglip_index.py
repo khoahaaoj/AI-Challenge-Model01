@@ -46,10 +46,11 @@ def _load_siglip_model():
     import open_clip
     print(f"[SigLIP2] Load model: {MODEL_NAME}")
     print("[SigLIP2] Lần đầu sẽ tải ~3.5GB từ HuggingFace, sau đó cache tại ~/.cache/")
-    model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED)
+    model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED,
+                                                                   precision="fp16" if config.DEVICE == "cuda" else "fp32")
     model = model.to(config.DEVICE).eval()
     tokenizer = open_clip.get_tokenizer(MODEL_NAME)
-    print(f"[SigLIP2] Model ready trên {config.DEVICE}")
+    print(f"[SigLIP2] Model ready trên {config.DEVICE} (fp16={config.DEVICE == 'cuda'})")
     return model, preprocess, tokenizer
 
 
@@ -136,7 +137,10 @@ def build_siglip_index():
 
             with torch.no_grad():
                 batch_tensor = torch.stack(imgs).to(config.DEVICE)
+                if config.DEVICE == "cuda":
+                    batch_tensor = batch_tensor.half()  # fp16 để khớp model
                 feats = model.encode_image(batch_tensor)
+                feats = feats.float()  # convert về float32 trước khi normalize
                 feats = feats / feats.norm(dim=-1, keepdim=True)
                 vecs = feats.cpu().numpy().astype("float32")
 

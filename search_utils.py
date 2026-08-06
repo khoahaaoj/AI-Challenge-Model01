@@ -145,7 +145,11 @@ def get_siglip_model():
         MODEL_NAME = "ViT-SO400M-14-SigLIP2-378"
         PRETRAINED = "webli"
         print(f"[SigLIP2] Load model cho query encoding...")
-        _siglip_model, _, _siglip_preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED)
+        _siglip_model, _, _siglip_preprocess = open_clip.create_model_and_transforms(
+            MODEL_NAME, 
+            pretrained=PRETRAINED,
+            precision="fp16" if config.DEVICE == "cuda" else "fp32"
+        )
         _siglip_model = _siglip_model.to(config.DEVICE).eval()
         _siglip_tokenizer = open_clip.get_tokenizer(MODEL_NAME)
         print("[SigLIP2] Model ready.")
@@ -391,11 +395,21 @@ def search_siglip(query, top_k=None, _pre_translated=None):
 
     clip_query = _pre_translated if _pre_translated is not None else translate_query_for_clip(query)
 
-    with torch.no_grad():
-        tokens = tokenizer([clip_query]).to(config.DEVICE)
-        feat = model.encode_text(tokens)
-        feat = feat / feat.norm(dim=-1, keepdim=True)
-        vec = feat.cpu().numpy().astype("float32")
+    try:
+        with torch.no_grad():
+            tokens = tokenizer([clip_query]).to(config.DEVICE)
+            feat = model.encode_text(tokens)
+            feat = feat / feat.norm(dim=-1, keepdim=True)
+            vec = feat.cpu().numpy().astype("float32")
+    except torch.cuda.OutOfMemoryError:
+        print("⚠️ [OOM Catcher] SigLIP2 hết VRAM! Tự động chuyển sang CPU...")
+        torch.cuda.empty_cache()
+        model = model.to("cpu")
+        with torch.no_grad():
+            tokens = tokenizer([clip_query]).to("cpu")
+            feat = model.encode_text(tokens)
+            feat = feat / feat.norm(dim=-1, keepdim=True)
+            vec = feat.cpu().numpy().astype("float32")
 
     scores, idxs = _siglip_index.search(vec, top_k)
     results = []
@@ -665,7 +679,16 @@ def rerank(query, candidates, top_k=None):
 
     reranker = get_reranker_model()
     pairs = [[query, _get_passage_for_candidate(c)] for c in candidates]
-    scores = reranker.compute_score(pairs, normalize=True)
+    try:
+        scores = reranker.compute_score(pairs, normalize=True)
+    except torch.cuda.OutOfMemoryError:
+        print("⚠️ [OOM Catcher] Reranker hết VRAM! Tự động chuyển sang CPU...")
+        import torch
+        torch.cuda.empty_cache()
+        # BGE Reranker (FlagReranker) lưu model thực ở thuộc tính model
+        reranker.model = reranker.model.to("cpu")
+        reranker.device = "cpu"
+        scores = reranker.compute_score(pairs, normalize=True)
 
     fused_vals = [c.get("fused_score", 0.0) for c in candidates]
     lo, hi = (min(fused_vals), max(fused_vals)) if fused_vals else (0, 1)
@@ -754,12 +777,13 @@ def full_search(query, fusion_method=None, do_verify=False, top_k=None, skip_rer
     """
     fusion_method = fusion_method or config.FUSION_METHOD
     top_k = top_k or config.TOP_K_RETRIEVE
+    print(f"\n[Search API] Đang xử lý query: '{query}'")
 
     # Dịch 1 lần duy nhất, dùng chung cho cả SigLIP2 và BGE-M3
     lang = detect_language(query)
     if lang != "en":
         translated_query = translate_query_for_clip(query)
-        print(f"[full_search] '{query}' → '{translated_query}' (SigLIP2 + BGE-M3)")
+        print(f"[full_search] Đã dịch: '{query}' → '{translated_query}'")
     else:
         translated_query = query
 
