@@ -22,9 +22,9 @@ def parse_trake_query(query: str) -> list[str]:
                 return [q.strip() for q in query.split(kw) if q.strip()]
         return [query]
 
-    import google.generativeai as genai
-    genai.configure(api_key=config.GEMINI_API_KEY)
-    model = genai.GenerativeModel(config.GEMINI_MODEL)
+    import json as _json
+    from google import genai as _genai
+    client = _genai.Client(api_key=config.GEMINI_API_KEY)
     
     prompt = (
         f"Bạn là chuyên gia phân tích video. Hãy tách câu truy vấn dưới đây thành một danh sách "
@@ -35,14 +35,16 @@ def parse_trake_query(query: str) -> list[str]:
     )
     
     try:
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        if text.startswith("```json"):
-            text = text[7:-3].strip()
-        elif text.startswith("```"):
-            text = text[3:-3].strip()
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=prompt
+        )
+        text = (response.text or "").strip()
+        # Strip markdown code fences robustly
+        if text.startswith("```"):
+            text = text.split("```")[1].lstrip("json").strip()
             
-        sub_queries = json.loads(text)
+        sub_queries = _json.loads(text)
         if isinstance(sub_queries, list) and len(sub_queries) > 0:
             return sub_queries
     except Exception as e:

@@ -683,11 +683,16 @@ def rerank(query, candidates, top_k=None):
         scores = reranker.compute_score(pairs, normalize=True)
     except torch.cuda.OutOfMemoryError:
         print("⚠️ [OOM Catcher] Reranker hết VRAM! Tự động chuyển sang CPU...")
-        import torch
         torch.cuda.empty_cache()
-        # BGE Reranker (FlagReranker) lưu model thực ở thuộc tính model
-        reranker.model = reranker.model.to("cpu")
-        reranker.device = "cpu"
+        import gc
+        global _reranker_model
+        _reranker_model = None
+        reranker = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        from FlagEmbedding import FlagReranker
+        _reranker_model = FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=False, devices='cpu')
+        reranker = _reranker_model
         scores = reranker.compute_score(pairs, normalize=True)
 
     fused_vals = [c.get("fused_score", 0.0) for c in candidates]

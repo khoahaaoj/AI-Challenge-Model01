@@ -337,8 +337,15 @@ if results:
                         )
                         item["edited_frame_ids"] = [int(x.strip()) for x in edited_str.split(",") if x.strip().isdigit()]
                         
-                        for ev_idx, ev in enumerate(item["trake_events"]):
-                            st.caption(f"- Sự kiện {ev_idx+1}: Frame `{ev['frame_idx']}` lúc `{ev['timestamp_sec']}s`")
+                        # Hiển thị chuỗi ảnh để dễ nhìn
+                        ev_cols = st.columns(len(item["trake_events"]))
+                        import os
+                        for ev_idx, (col, ev) in enumerate(zip(ev_cols, item["trake_events"])):
+                            with col:
+                                st.caption(f"Sự kiện {ev_idx+1}: Frame `{ev['frame_idx']}`")
+                                ev_img_path = search_utils._get_btc_image_path(ev["video_id"], ev["frame_idx"])
+                                if os.path.exists(ev_img_path):
+                                    st.image(ev_img_path, use_container_width=True)
 
                 # ---- Text khớp (nếu có) ----
                 if item.get("matched_text"):

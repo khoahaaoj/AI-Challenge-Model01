@@ -6,12 +6,14 @@
 
 ---
 
-## 🌟 Cập Nhật Mới Nhất (06/08)
+## 🌟 Cập Nhật Mới Nhất (11/08)
 
-*   **Tối ưu VRAM cực hạn (OOM Catcher)**: Ép nhánh `CLIP ViT-B/32` chạy CPU, ép `SigLIP2` và `Reranker` xuống `fp16`. Bổ sung cơ chế fallback tự động đẩy model sang CPU khi phát hiện `torch.cuda.OutOfMemoryError`.
-*   **Sửa lỗi UI Streamlit**: Khắc phục triệt để lỗi State Management của các checkbox chọn ảnh và nút "Xóa hết", "Top 1", "Top 5".
-*   **Làm việc nhóm từ xa**: Bổ sung cơ chế host app qua Cloudflare Tunnel để cả team cùng search chung một backend.
-*   **Synthetic Eval Queries**: Tự động sinh `eval_queries.json` từ Metadata để kiểm thử tự động điểm số Recall@K bằng `eval_retrieval.py`.
+*   **SigLIP2-SO400M hoàn chỉnh**: Build xong toàn bộ 177,321 keyframe BTC với SigLIP2-SO400M (dim=1152). Pipeline giờ chạy **4 nhánh song song** (CLIP + SigLIP2 + BGE-M3 + BM25) → RRF Fusion → CrossEncoder.
+*   **Fix OCR frame_idx mapping**: Sửa bug 96.9% OCR records có `frame_idx` sai khi build text index. Text index đã rebuild với 322,291 records (metadata 873 + objects 171,741 + OCR 149,677), frame_idx và timestamp khớp 100% ground truth BTC.
+*   **Tối ưu VRAM (OOM Catcher)**: Fallback tự động sang CPU khi `torch.cuda.OutOfMemoryError` cho cả SigLIP2 và Reranker.
+*   **Sửa lỗi UI Streamlit**: Khắc phục State Management của checkbox, nút "Xóa hết", "Top 1", "Top 5".
+*   **Cloudflare Tunnel**: Host app qua `cloudflared` để cả team cùng dùng 1 backend từ xa.
+*   **Synthetic Eval Queries**: Đo R@1/5/20/50/100 tự động bằng `eval_retrieval.py`.
 
 ---
 
@@ -80,11 +82,12 @@ Hệ thống dùng **dữ liệu chính thức BTC** làm nguồn chính — kh�
 │      → threshold 0.2, đếm số lượng → "Person Person Car Building"      │
 │      → đại diện NỘI DUNG TRỰC QUAN trong từng keyframe                 │
 │                                                                          │
-│  [3] OCR (frame-level, ~4k+ records nếu đã chạy OCR):                  │
-│      Text thật đọc được trong ảnh (news ticker, tên người, số...)       │
+│  [3] OCR (frame-level, ~149k records nếu đã chạy OCR):                 │
+│      EasyOCR (vi+en) đọc text trong ảnh (news ticker, biển hiệu...)    │
+│      frame_idx khớp ground truth qua kf_seq_lookup (seq → frame_idx)   │
 │      → đại diện TEXT XUẤT HIỆN trong khung hình                        │
 │                                                                          │
-│      ↓ Tổng: 177k records                                               │
+│      ↓ Tổng: 322,291 records (873 + 171,741 + 149,677)                 │
 │  BGE-M3 (FlagEmbedding, đa ngôn ngữ vi+en, dim=1024, chạy CPU)         │
 │    → encode tất cả → FAISS IndexFlatIP                                  │
 │    → index/btc_text_index.faiss  +  btc_text_id_map.json               │
@@ -161,11 +164,11 @@ QUERY (tiếng Việt hoặc tiếng Anh)
 
   ▼  RRF Fusion  (Reciprocal Rank Fusion, k=60)
   ┌────────────────────────────────────────────────────────┐
-  │  score(frame) = Σᵢ  weightᵢ / (k + rankᵢ(frame))     │
-  │  Trọng số: Ảnh × 3.0  /  Text × 1.0  /  BM25 × 0.5  │
-  │  → Ảnh được ưu tiên vì dataset AIC visual-heavy       │
-  │  → Khử trùng: cùng video_id + frame_idx → giữ cao    │
-  │  → Output: Top-100 candidates hợp nhất                │
+  │  score(frame) = Σᵢ  weightᵢ / (k + rankᵢ(frame))        │
+  │  Trọng số: CLIP×3.0 / SigLIP2×2.5 / BGE-M3×1.0 / BM25×0.5│
+  │  → CLIP + SigLIP2 được ưu tiên vì dataset visual-heavy   │
+  │  → Khử trùng: cùng video_id + frame_idx → giữ cao       │
+  │  → Output: Top-100 candidates hợp nhất                   │
   └────────────────────────────────────────────────────────┘
          │
          ▼  CrossEncoder Reranker
@@ -232,16 +235,18 @@ QUERY (tiếng Việt hoặc tiếng Anh)
 
 | Thành phần | Model | Chạy trên | VRAM/RAM |
 |---|---|---|---|
-| Image encoder | **CLIP ViT-B/32** (OpenAI) | GPU | ~600MB VRAM |
+| Image encoder #1 | **CLIP ViT-B/32** (OpenAI, dim=512) | GPU/CPU | ~600MB VRAM |
+| Image encoder #2 | **SigLIP2-SO400M** (dim=1152) | GPU fp16 / CPU | ~3.5GB VRAM |
 | Text embedding | **BGE-M3** (dense, dim=1024) | **CPU** | ~4GB RAM |
-| Sparse retrieval | **BM25 Okapi** | CPU | <100MB RAM |
-| Reranker | **bge-reranker-v2-m3** fp16 | GPU | ~1.1GB VRAM |
-| OCR | **EasyOCR** (vi+en) | CPU (build-time) | — |
-| Ngôn ngữ detect | **langid** | CPU | ~15MB |
+| Sparse retrieval | **BM25 Okapi** | CPU | ~80MB RAM |
+| Reranker | **bge-reranker-v2-m3** fp16 | GPU/CPU fallback | ~1.1GB VRAM |
+| OCR (build-time) | **EasyOCR** (vi+en) | GPU → CPU | — |
+| Language detect | **langid** | CPU | ~15MB |
 | Dịch fallback | **NLLB-200-distilled-600M** | CPU | ~2.4GB RAM |
-| Dịch / Q&A / Verify | **Gemini API** (`google-genai` SDK) | Cloud | — |
+| Dịch / Q&A / Verify | **Gemini API** (`gemini-3.5-flash-lite`) | Cloud | — |
 
-> **Tổng VRAM khi search:** CLIP (~600MB) + Reranker fp16 (~1.1GB) + overhead (~300MB) ≈ **~2GB** — an toàn với card 4GB VRAM.
+> **VRAM khi search (đủ index):** CLIP (~600MB) + SigLIP2 fp16 (~3.5GB) + Reranker fp16 (~1.1GB) ≈ **~5GB**  
+> → Trên card 4GB: SigLIP2 + Reranker tự động fallback CPU (OOM Catcher) — pipeline vẫn chạy đủ 4 nhánh.
 
 ---
 
@@ -358,11 +363,13 @@ aic_retrieval/
 │   └── ocr.json
 │
 └── index/
-    ├── btc_image_index.faiss
+    ├── btc_image_index.faiss      # CLIP ViT-B/32, dim=512, 177,321 vectors
     ├── btc_image_id_map.json
-    ├── btc_text_index.faiss
+    ├── siglip_image_index.faiss   # SigLIP2-SO400M, dim=1152, 177,321 vectors
+    ├── siglip_image_id_map.json
+    ├── btc_text_index.faiss       # BGE-M3, dim=1024, 322,291 records
     ├── btc_text_id_map.json
-    └── btc_bm25_index.pkl
+    └── btc_bm25_index.pkl         # BM25 Okapi, 322,291 records
 ```
 
 ---

@@ -88,6 +88,9 @@ def evaluate(queries: list, use_expansion=False, verbose=True):
             )
             rank_str = f"Rank {found_at}" if found_at else "Not found"
             print(f"[{i+1:02d}] R@1:{r1} | {rank_str} | {elapsed:.1f}s | {query[:50]}...")
+            if not found_at:
+                print(f"    Top 3 found: [{results[0]['video_id']}:{results[0]['frame_idx']}], [{results[1]['video_id']}:{results[1]['frame_idx']}], [{results[2]['video_id']}:{results[2]['frame_idx']}]")
+                print(f"    Ground truth: {gt_vid}:{gt_frame}")
 
     print(f"\n{'='*60}")
     print("KẾT QUẢ RECALL@K:")

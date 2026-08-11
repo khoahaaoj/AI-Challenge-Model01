@@ -109,28 +109,37 @@ def build_btc_text_records():
 
 
     # 3. Load OCR (Frame-level)
+    # [BUG FIX] Tên file BTC là số thứ tự (001.jpg = ảnh thứ 1, không phải frame_idx thật).
+    # Phải tra kf_map để lấy frame_idx thật và timestamp_sec đúng.
     if os.path.exists(config.OCR_CACHE):
         ocr_data = load_json(config.OCR_CACHE)
         ocr_count = 0
+        # Build lookup: video_id -> {seq_num (1-based): frame_info}
+        kf_seq_lookup = {}
+        for vid, frames in kf_map.items():
+            kf_seq_lookup[vid] = {i + 1: f for i, f in enumerate(frames)}
+        
         for path, text in ocr_data.items():
             text = text.strip()
             if not text:
                 continue
             
             # path: .../data/keyframes/L10_V010/001.jpg
+            # 001.jpg → seq_num=1 → kf_map[video_id][0] (frame thứ nhất)
             try:
                 filename = os.path.basename(path)
                 video_id = os.path.basename(os.path.dirname(path))
-                frame_idx_str = filename.split(".")[0]
-                frame_idx = int(frame_idx_str)
+                seq_num = int(filename.split(".")[0])  # 001 → 1, 002 → 2 ...
                 
-                # Cần timestamp_sec. Lấy từ kf_map nếu có
-                timestamp_sec = 0.0
-                if video_id in kf_map:
-                    for f in kf_map[video_id]:
-                        if f["frame_idx"] == frame_idx:
-                            timestamp_sec = f["timestamp_sec"]
-                            break
+                # Tra kf_map để lấy frame_idx thật và timestamp_sec
+                if video_id in kf_seq_lookup and seq_num in kf_seq_lookup[video_id]:
+                    frame_info = kf_seq_lookup[video_id][seq_num]
+                    frame_idx = frame_info["frame_idx"]
+                    timestamp_sec = frame_info["timestamp_sec"]
+                else:
+                    # Fallback cho video không thuộc BTC (video01, video02...)
+                    frame_idx = seq_num
+                    timestamp_sec = 0.0
                             
                 records.append({
                     "text": text,

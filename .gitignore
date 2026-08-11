@@ -20,3 +20,16 @@ index/
 
 # API keys and configs
 .env
+
+# Log files
+*.log
+streamlit.log
+siglip_build.log
+cloudflared.log
+
+# Cloudflare tunnel binary (tải trực tiếp, không cần commit)
+cloudflared
+
+# Temp files
+pdf_text.txt
+*.aria2
