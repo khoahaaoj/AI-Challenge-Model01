@@ -28,20 +28,37 @@ import faiss
 import torch
 from PIL import Image
 
-# Fix AttributeError: type object 'tqdm' has no attribute '_lock' khi HuggingFace snapshot_download chạy trong Streamlit thread
+# Fix AttributeError / RuntimeError khi HuggingFace snapshot_download chạy trong Streamlit thread
+# Cách cũ dùng nested `with` + `except: yield None` bị lỗi "generator didn't stop"
+# vì @contextmanager chỉ được yield đúng 1 lần.
+# Cách mới: gọi __enter__/__exit__ thủ công để kiểm soát yield chính xác 1 lần.
 try:
-    import tqdm
     import tqdm.contrib.concurrent as _tqdm_concurrent
     from contextlib import contextmanager
 
     _orig_ensure_lock = _tqdm_concurrent.ensure_lock
+
     @contextmanager
     def _safe_ensure_lock(*args, **kwargs):
+        lock_cm = None
+        lk = None
         try:
-            with _orig_ensure_lock(*args, **kwargs) as lk:
-                yield lk
-        except AttributeError:
+            lock_cm = _orig_ensure_lock(*args, **kwargs)
+            lk = lock_cm.__enter__()
+        except Exception:
+            # __enter__ thất bại → yield None (chưa yield lần nào → an toàn)
             yield None
+            return
+        # __enter__ thành công → yield lock
+        try:
+            yield lk
+        finally:
+            # Luôn gọi __exit__ để giải phóng lock, nuốt mọi lỗi
+            try:
+                lock_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+
     _tqdm_concurrent.ensure_lock = _safe_ensure_lock
 except Exception:
     pass
@@ -590,6 +607,12 @@ def fuse_rrf(image_results, text_results, bm25_results=None, siglip_results=None
     """
     Reciprocal Rank Fusion (RRF) cho 4 nhánh: CLIP + SigLIP2 + BGE-M3 + BM25.
     SigLIP2 chỉ được dùng nếu siglip_results không rỗng (index đã build).
+
+    Trọng số (weight) phản ánh chất lượng mô hình:
+      SigLIP2-SO400M : 3.0  ← mạnh nhất, dim=1152
+      BGE-M3 dense   : 2.5  ← text semantic đa ngôn ngữ
+      CLIP ViT-B/32  : 2.0  ← BTC official features, weaker visual model
+      BM25 sparse    : 1.5  ← exact keyword: OCR + object labels + metadata
     """
     k = k or config.RRF_K
     top_k = top_k or config.TOP_K_RETRIEVE
@@ -597,29 +620,29 @@ def fuse_rrf(image_results, text_results, bm25_results=None, siglip_results=None
     rrf_scores = {}
     item_cache = {}
 
-    # CLIP ViT-B/32 (BTC) — weight 3.0
+    # CLIP ViT-B/32 (BTC) — weight 2.0 (official BTC features nhưng model yếu hơn SigLIP2)
     for rank, item in enumerate(image_results):
+        key = _key(item)
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 2.0 / (k + rank + 1)
+        item_cache.setdefault(key, item)
+
+    # SigLIP2-SO400M (self-encoded) — weight 3.0 (mạnh nhất, ~15-20% tốt hơn CLIP ViT-B/32)
+    for rank, item in enumerate(siglip_results or []):
         key = _key(item)
         rrf_scores[key] = rrf_scores.get(key, 0.0) + 3.0 / (k + rank + 1)
         item_cache.setdefault(key, item)
 
-    # SigLIP2-SO400M (self-encoded) — weight 2.5 (chất lượng cao hơn CLIP ViT-B/32)
-    for rank, item in enumerate(siglip_results or []):
-        key = _key(item)
-        rrf_scores[key] = rrf_scores.get(key, 0.0) + 2.5 / (k + rank + 1)
-        item_cache.setdefault(key, item)
-
-    # BGE-M3 text — weight 1.0
+    # BGE-M3 text — weight 2.5 (multilingual, hiểu tốt cả tiếng Việt + tiếng Anh)
     for rank, item in enumerate(text_results):
         key = _key(item)
-        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 2.5 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
 
-    # BM25 sparse — weight 0.5
+    # BM25 sparse — weight 1.5 (exact keyword: OCR + object labels + metadata)
     for rank, item in enumerate(bm25_results or []):
         key = _key(item)
-        rrf_scores[key] = rrf_scores.get(key, 0.0) + 0.5 / (k + rank + 1)
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.5 / (k + rank + 1)
         if key not in item_cache or "matched_text" not in item_cache[key]:
             item_cache[key] = item
 

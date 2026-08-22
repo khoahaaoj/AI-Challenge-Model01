@@ -6,14 +6,13 @@
 
 ---
 
-## 🌟 Cập Nhật Mới Nhất (11/08)
+## 🌟 Cập Nhật Mới Nhất
 
+*   **Sửa lỗi chuỗi TRAKE (Chronological Order)**: Sửa logic fallback đảm bảo chuỗi các keyframe kiện E1, E2, E3 luôn tuân thủ nghiêm ngặt thứ tự thời gian ($F_{E1} \le F_{E2} \le F_{E3}$).
+*   **Frame Browser UI**: Di chuyển và làm lại giao diện duyệt frame theo video_id ra màn hình chính, cho phép hiển thị ảnh to, dễ dàng chọn frame và lưu trực tiếp vào kết quả (Rất hữu ích để sửa lỗi tìm kiếm TRAKE thủ công).
+*   **Đóng gói tự động (fix_and_zip.py)**: Tự động format, loại bỏ các ký tự BOM ẩn, sửa lỗi dấu phẩy dư ở cuối, và nén các file CSV theo đúng chuẩn submission của BTC.
 *   **SigLIP2-SO400M hoàn chỉnh**: Build xong toàn bộ 177,321 keyframe BTC với SigLIP2-SO400M (dim=1152). Pipeline giờ chạy **4 nhánh song song** (CLIP + SigLIP2 + BGE-M3 + BM25) → RRF Fusion → CrossEncoder.
-*   **Fix OCR frame_idx mapping**: Sửa bug 96.9% OCR records có `frame_idx` sai khi build text index. Text index đã rebuild với 322,291 records (metadata 873 + objects 171,741 + OCR 149,677), frame_idx và timestamp khớp 100% ground truth BTC.
 *   **Tối ưu VRAM (OOM Catcher)**: Fallback tự động sang CPU khi `torch.cuda.OutOfMemoryError` cho cả SigLIP2 và Reranker.
-*   **Sửa lỗi UI Streamlit**: Khắc phục State Management của checkbox, nút "Xóa hết", "Top 1", "Top 5".
-*   **Cloudflare Tunnel**: Host app qua `cloudflared` để cả team cùng dùng 1 backend từ xa.
-*   **Synthetic Eval Queries**: Đo R@1/5/20/50/100 tự động bằng `eval_retrieval.py`.
 
 ---
 

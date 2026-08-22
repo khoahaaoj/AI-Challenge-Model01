@@ -10,52 +10,90 @@ import json
 import config
 import search_utils
 
+import re as _re
+
+
+def _extract_video_context(query: str) -> str:
+    """Lấy phần mô tả context video (text trước E1:)."""
+    match = _re.search(r'\bE\s*1\s*:', query, _re.IGNORECASE)
+    if match:
+        ctx = query[:match.start()].strip().rstrip(',.:;-\n').strip()
+        return ctx[:150] if ctx else ""
+    return ""
+
+
+def _parse_by_regex(query: str) -> list[str] | None:
+    """
+    Ưu tiên 1: Tách events theo nhãn E1: E2: E3: ... bằng regex.
+    Không cần gọi API. Chính xác với format chuẩn BTC.
+    """
+    pattern = _re.compile(r'E\s*(\d+)\s*:\s*(.*?)(?=E\s*\d+\s*:|$)', _re.DOTALL | _re.IGNORECASE)
+    matches = pattern.findall(query)
+    if not matches or len(matches) < 2:
+        return None
+    matches_sorted = sorted(matches, key=lambda x: int(x[0]))
+    events = [m[1].strip() for m in matches_sorted if m[1].strip()]
+    if len(events) < 2:
+        return None
+    # Thêm context video vào từng event để tăng recall
+    ctx = _extract_video_context(query)
+    if ctx:
+        events = [f"{ctx}. {e}" for e in events]
+    return events
+
+
 def parse_trake_query(query: str) -> list[str]:
     """
-    Dùng Gemini để tách câu truy vấn TRAKE thành danh sách các sự kiện theo thứ tự.
-    Trả về list các câu sub-query.
+    Tách câu truy vấn TRAKE thành danh sách các sự kiện theo thứ tự.
+    Ưu tiên:
+    1. Regex (E1:/E2:/E3: format chuẩn BTC) — nhanh, không cần API
+    2. Gemini (query dạng tự do)
+    3. Fallback cắt keyword thời gian
     """
-    if not config.GEMINI_API_KEY:
-        # Fallback chia tay bằng keyword đơn giản nếu không có API
-        for kw in ["sau đó", "tiếp theo", "rồi", ", rồi"]:
-            if kw in query:
-                return [q.strip() for q in query.split(kw) if q.strip()]
-        return [query]
+    # --- 1. Regex (BTC format) ---
+    regex_result = _parse_by_regex(query)
+    if regex_result:
+        print(f"[TRAKE][Regex] {len(regex_result)} events: {[e[:60] for e in regex_result]}")
+        return regex_result
 
-    import json as _json
-    from google import genai as _genai
-    client = _genai.Client(api_key=config.GEMINI_API_KEY)
-    
-    prompt = (
-        f"Bạn là chuyên gia phân tích video. Hãy tách câu truy vấn dưới đây thành một danh sách "
-        f"các sự kiện diễn ra theo thứ tự thời gian.\n"
-        f"Truy vấn: '{query}'\n\n"
-        f"Chỉ trả về 1 mảng JSON hợp lệ chứa các chuỗi (không thêm text nào khác, không có markdown).\n"
-        f"Ví dụ: [\"Người đàn ông bước vào phòng\", \"Bật đèn sáng\"]"
-    )
-    
-    try:
-        response = client.models.generate_content(
-            model=config.GEMINI_MODEL,
-            contents=prompt
+    # --- 2. Gemini (query tự do) ---
+    if config.GEMINI_API_KEY:
+        import json as _json
+        from google import genai as _genai
+        client = _genai.Client(api_key=config.GEMINI_API_KEY)
+        ctx = _extract_video_context(query)
+        prompt = (
+            f"Bạn là chuyên gia phân tích video. Hãy tách câu truy vấn dưới đây thành một danh sách "
+            f"các sự kiện diễn ra theo thứ tự thời gian.\n"
+            f"Truy vấn: '{query}'\n\n"
+            f"Chỉ trả về 1 mảng JSON hợp lệ chứa các chuỗi (không thêm text nào khác, không có markdown).\n"
+            f"Mỗi event nên bao gồm context video để dễ tìm kiếm.\n"
+            f"Ví dụ: [\"Người đàn ông bước vào phòng\", \"Bật đèn sáng\"]"
         )
-        text = (response.text or "").strip()
-        # Strip markdown code fences robustly
-        if text.startswith("```"):
-            text = text.split("```")[1].lstrip("json").strip()
-            
-        sub_queries = _json.loads(text)
-        if isinstance(sub_queries, list) and len(sub_queries) > 0:
-            return sub_queries
-    except Exception as e:
-        print(f"[TRAKE] Lỗi parse LLM ({e}), dùng fallback cắt chuỗi.")
-        
-    # Fallback
+        try:
+            response = client.models.generate_content(model=config.GEMINI_MODEL, contents=prompt)
+            text = (response.text or "").strip()
+            if text.startswith("```"):
+                text = text.split("```")[1].lstrip("json").strip()
+            sub_queries = _json.loads(text)
+            if isinstance(sub_queries, list) and len(sub_queries) > 0:
+                if ctx:
+                    sub_queries = [
+                        f"{ctx}. {e}" if not e.startswith(ctx[:30]) else e
+                        for e in sub_queries
+                    ]
+                print(f"[TRAKE][Gemini] {len(sub_queries)} events")
+                return sub_queries
+        except Exception as e:
+            print(f"[TRAKE] Gemini parse lỗi ({e}), dùng fallback.")
+
+    # --- 3. Fallback keyword ---
     for kw in ["sau đó", "tiếp theo", "rồi", ", rồi", "rồi đến"]:
         if kw in query:
             return [q.strip() for q in query.split(kw) if q.strip()]
-            
+
     return [query]
+
 
 
 def search_trake_sequence(query: str, top_k_per_event=500, time_window_sec=60):
@@ -108,47 +146,69 @@ def search_trake_sequence(query: str, top_k_per_event=500, time_window_sec=60):
     # 4. Tìm chuỗi thỏa mãn thứ tự thời gian
     valid_sequences = []
     for vid, items in grouped_events.items():
-        # Lấy tất cả frame của sự kiện 0 (nếu có, hoặc sự kiện 1 nếu sự kiện 0 bị miss)
-        starts = [it for idx, it in items if idx == 0]
-        if not starts:
-            # Nếu sự kiện đầu bị miss, thử bắt đầu từ sự kiện 1
-            starts = [it for idx, it in items if idx == 1]
-            start_idx = 1
+        # Group candidates theo event index
+        event_candidates = {}  # {e_idx: [item, ...]}
+        for e_idx, it in items:
+            event_candidates.setdefault(e_idx, []).append(it)
+
+        # Build sequence: lặp qua từng event 0..N-1, luôn đảm bảo đủ N frames
+        current_seq = []
+        last_time = -1.0
+
+        for e_idx in range(len(sub_queries)):
+            candidates = event_candidates.get(e_idx, [])
+
+            # Ưu tiên frame hợp lệ trong time window (sau last_time, không quá 2 phút)
+            valid_nexts = [
+                c for c in candidates
+                if 0 < (c["timestamp_sec"] - last_time) <= time_window_sec
+            ]
+
+            if valid_nexts:
+                # Lấy frame tốt nhất trong window
+                best = max(valid_nexts, key=lambda x: x.get("fused_score", x.get("score", 0)))
+                last_time = best["timestamp_sec"]
+            elif candidates:
+                # Fallback: ưu tiên frame SAU last_time (dù vượt window)
+                after = [c for c in candidates if c["timestamp_sec"] > last_time]
+                if after:
+                    best = max(after, key=lambda x: x.get("fused_score", x.get("score", 0)))
+                    last_time = best["timestamp_sec"]
+                else:
+                    # Tất cả candidate đều TRƯỚC last_time → dùng frame tốt nhất
+                    # nhưng ĐẶT timestamp giả = last_time+1 để last_time luôn tiến lên
+                    best = dict(max(candidates, key=lambda x: x.get("fused_score", x.get("score", 0))))
+                    last_time = last_time + 1.0
+                    best["timestamp_sec"] = last_time  # ghi nhớ vị trí giả
+            elif current_seq:
+                # Không có candidate nào → lặp frame trước, timestamp +1s
+                best = dict(current_seq[-1])
+                last_time = last_time + 1.0
+                best["timestamp_sec"] = last_time
+            else:
+                break
+
+            current_seq.append(best)
+
+        # Chỉ nhận sequence có đủ N frames
+        if len(current_seq) == len(sub_queries):
+            # Safety: đảm bảo frame_idx tăng dần (BTC yêu cầu thứ tự thời gian)
+            is_ordered = all(
+                current_seq[i]["frame_idx"] <= current_seq[i+1]["frame_idx"]
+                for i in range(len(current_seq) - 1)
+            )
+            if not is_ordered:
+                print(f"[TRAKE] ⚠️ {vid}: sequence không theo thứ tự frame_idx, bỏ qua")
+                continue
+            total_score = sum(ev.get("fused_score", ev.get("score", 0)) for ev in current_seq)
+            valid_sequences.append({
+                "video_id": vid,
+                "total_score": total_score,
+                "events": current_seq,
+            })
         else:
-            start_idx = 0
-            
-        for start_item in starts:
-            current_seq = [start_item]
-            last_time = start_item["timestamp_sec"]
-            is_valid = True
-            missed_events = 1 if start_idx == 1 else 0
-            
-            for target_e_idx in range(start_idx + 1, len(sub_queries)):
-                candidates = [it for idx, it in items if idx == target_e_idx]
-                valid_nexts = [
-                    c for c in candidates 
-                    if 0 < (c["timestamp_sec"] - last_time) <= time_window_sec
-                ]
-                
-                if not valid_nexts:
-                    missed_events += 1
-                    if missed_events > (len(sub_queries) - min_match):
-                        is_valid = False
-                        break
-                    continue
-                    
-                best_next = max(valid_nexts, key=lambda x: x.get("fused_score", x.get("score", 0)))
-                current_seq.append(best_next)
-                last_time = best_next["timestamp_sec"]
-                
-            if is_valid and len(current_seq) >= min_match:
-                total_score = sum(ev.get("fused_score", ev.get("score", 0)) for ev in current_seq)
-                valid_sequences.append({
-                    "video_id": vid,
-                    "total_score": total_score,
-                    "events": current_seq
-                })
-                
+            print(f"[TRAKE] Bỏ qua {vid}: chỉ tìm được {len(current_seq)}/{len(sub_queries)} events")
+
     # 5. Sort theo điểm tổng
     valid_sequences.sort(key=lambda x: x["total_score"], reverse=True)
     return valid_sequences

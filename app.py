@@ -105,7 +105,7 @@ with st.sidebar:
         help="Gửi ảnh thật cho Gemini chấm điểm 0-10. Chính xác hơn nhưng chậm hơn.",
     )
     cols_per_row = st.slider("Cột hiển thị", 2, 5, 3)
-    top_k_display = st.slider("Số kết quả", 1, 10, 10)
+    top_k_display = st.slider("Số kết quả", 1, 50, 10, help="Tăng lên 50 để nộp nhiều dòng CSV hơn (tối đa 100 theo quy chế BTC). Dùng fused results khi >10.")
     use_expansion = st.checkbox(
         "🔍 Query Expansion (Gemini)",
         value=False,
@@ -129,10 +129,10 @@ with st.sidebar:
                 if st.session_state.query_type == "trake":
                     st.markdown(f"- `{r['video_id']}` · frames `{r['frame_ids']}`")
                 else:
-                    st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}` · `{r.get('timestamp_sec', '')}s`")
+                    st.markdown(f"- `{r['video_id']}` · frame `{r['frame_idx']}`")
 
         # [P10] Quick Select buttons
-        col_s1, col_s5, col_clr = st.columns(3)
+        col_s1, col_s5, col_all, col_clr = st.columns(4)
         with col_s1:
             if st.button("⚡ Top 1", use_container_width=True, help="Chọn nhanh kết quả #1"):
                 if st.session_state.last_results:
@@ -148,51 +148,66 @@ with st.sidebar:
                     st.session_state.selected[k] = item.copy()
                     st.session_state[f"chk_{item['video_id']}_{item['frame_idx']}"] = True
                 st.rerun()
+        with col_all:
+            n_all = len(st.session_state.last_results)
+            if st.button(f"✅ Tất cả ({n_all})", use_container_width=True, help="Chọn toàn bộ kết quả đang hiển thị"):
+                for item in st.session_state.last_results:
+                    k = (item["video_id"], item["frame_idx"])
+                    st.session_state.selected[k] = item.copy()
+                    st.session_state[f"chk_{item['video_id']}_{item['frame_idx']}"] = True
+                st.rerun()
         with col_clr:
             if st.button("🗑️ Xóa hết", use_container_width=True):
                 st.session_state.selected = {}
                 for key in list(st.session_state.keys()):
                     if key.startswith("chk_"):
                         st.session_state[key] = False
-                # Không cần st.rerun() nếu ở đầu script, nhưng an toàn thì giữ
                 st.rerun()
-        
-        st.download_button(
-            label="⬇️ Tải JSON (AIC format)",
-            data=json.dumps(records, ensure_ascii=False, indent=2),
-            file_name="aic_submission.json",
-            mime="application/json",
-            use_container_width=True,
+
+        # ── Ô nhập tên file CSV (để đặt đúng tên query-p1-X-xxx.csv) ──
+        q_type = st.session_state.query_type
+        default_csv_name = f"query-p1-1-{q_type}.csv"
+        csv_filename = st.text_input(
+            "📝 Tên file CSV (đặt đúng theo BTC)",
+            value=st.session_state.get("csv_filename", default_csv_name),
+            help="VD: query-p1-1-kis.csv | query-p1-15-qa.csv | query-p1-4-trake.csv",
+            key="csv_filename",
         )
-        # CSV Header
-        if st.session_state.query_type == "trake":
-            csv_header = "video_id,frame_ids"
-        else:
-            csv_header = "video_id,frame_idx,timestamp_sec,keyframe_path"
-            if st.session_state.query_type == "qa":
-                csv_header += ",answer"
-            
-        csv_lines = [csv_header]
-        # Quy chế BTC: Nộp tối đa 100 kết quả
-        for r in records[:100]:
-            if st.session_state.query_type == "trake":
-                frame_ids_str = str(r['frame_ids']).replace('"', '""')
-                csv_lines.append(f"{r['video_id']},\"{frame_ids_str}\"")
-            else:
-                line = f"{r['video_id']},{r['frame_idx']},{r.get('timestamp_sec', '')},{r.get('keyframe_path', '')}"
-                if st.session_state.query_type == "qa":
-                    ans = str(r.get('answer', '')).replace('"', '""')
-                    line += f',"{ans}"'
-                csv_lines.append(line)
+        if not csv_filename.endswith(".csv"):
+            csv_filename += ".csv"
+
+        # ── Build CSV đúng format BTC (KHÔNG có header) ──
+        csv_lines = []
+        for r in records[:100]:          # tối đa 100 dòng theo quy chế
+            if q_type == "trake":
+                frame_ids = r.get("frame_ids", [])
+                ids_str = ",".join(str(x) for x in frame_ids)
+                csv_lines.append(f"{r['video_id']},{ids_str}")
+            elif q_type == "qa":
+                vid   = r["video_id"]
+                fidx  = r["frame_idx"]
+                ans   = str(r.get("answer", ""))
+                # Escape dấu phẩy / ngoặc kép trong answer theo chuẩn CSV RFC 4180
+                if "," in ans or '"' in ans or "\n" in ans:
+                    ans = '"' + ans.replace('"', '""') + '"'
+                csv_lines.append(f"{vid},{fidx},{ans}")
+            else:  # kis
+                csv_lines.append(f"{r['video_id']},{r['frame_idx']}")
+
+        csv_data = "\n".join(csv_lines) + "\n"
+
+        # Preview
+        with st.expander("👁️ Preview CSV (3 dòng đầu)", expanded=False):
+            st.code("\n".join(csv_lines[:3]), language="text")
 
         st.download_button(
-            label="⬇️ Tải CSV",
-            data="\n".join(csv_lines),
-            file_name="aic_submission.csv",
+            label=f"⬇️ Tải {csv_filename}",
+            data=csv_data,
+            file_name=csv_filename,
             mime="text/csv",
             use_container_width=True,
         )
-        
+
         # [P10] Xóa từng item riêng lẻ
         st.markdown("**Xóa từng ảnh khỏi danh sách:**")
         for r in records:
@@ -207,6 +222,7 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
+
     with st.expander("ℹ️ Hướng dẫn build index"):
         st.code(
             "python extract_keyframes.py\npython build_index.py\nstreamlit run app.py",
@@ -214,9 +230,71 @@ with st.sidebar:
         )
 
 
+
 # =================================================================
-# SEARCH BAR
+# FRAME BROWSER (TRAKE helper) — đặt ở main area, ảnh to dễ nhìn
 # =================================================================
+with st.expander("🏞️ Duyệt frame theo video (TRAKE)", expanded=False):
+    st.caption("Gõ Video ID → kéo slider → tìm đúng khoảnh khắc từng event E1/E2/E3/E4 rồi nậm frame_idx")
+    fb_vid = st.text_input("Video ID", placeholder="VD: L24_V028", key="fb_vid").strip()
+    if fb_vid:
+        search_utils.load_indices()
+        kf_meta = search_utils._keyframe_meta or {}
+        fb_frames = kf_meta.get(fb_vid, [])
+        if not fb_frames:
+            kf_dir = os.path.join(config.KEYFRAME_DIR, fb_vid)
+            if os.path.isdir(kf_dir):
+                imgs = sorted([f for f in os.listdir(kf_dir) if f.endswith((".jpg", ".png"))])
+                fb_frames = [{"frame_idx": int(f.split(".")[0]) if f.split(".")[0].isdigit() else i,
+                              "timestamp_sec": i * 2.0,
+                              "path": os.path.join(kf_dir, f)}
+                             for i, f in enumerate(imgs)]
+        if fb_frames:
+            fb_total = len(fb_frames)
+            fb_pos = st.slider(f"📂 {fb_vid} — {fb_total} keyframes", 0, fb_total - 1, 0, key="fb_pos")
+            fb_fr = fb_frames[fb_pos]
+            fb_img = fb_fr.get("path") or search_utils._get_btc_image_path(fb_vid, fb_fr["frame_idx"])
+
+            # Hiển thị ảnh to + 2 frame kế bên (dedup để tránh trùng khi ở đầu/cuối)
+            show_idx = list(dict.fromkeys([max(0, fb_pos - 1), fb_pos, min(fb_total - 1, fb_pos + 1)]))
+            cols = st.columns(len(show_idx))
+            for ci, si in enumerate(show_idx):
+                fr_i = fb_frames[si]
+                img_i = fr_i.get("path") or search_utils._get_btc_image_path(fb_vid, fr_i["frame_idx"])
+                with cols[ci]:
+                    label = "▶️ **Frame hiện tại**" if si == fb_pos else f"Frame {si + 1}"
+                    st.caption(label)
+                    if os.path.exists(img_i):
+                        st.image(img_i, use_container_width=True)
+                    st.markdown(f"`frame_idx = {fr_i['frame_idx']}` | `{fr_i.get('timestamp_sec', 0):.1f}s`")
+                    # Key dùng frame_idx (unique trong video) thay vì position si
+                    if st.button(f"➕ Chọn frame {fr_i['frame_idx']}", key=f"fb_add_{fb_vid}_{fr_i['frame_idx']}"):
+                        sel = {"video_id": fb_vid, "frame_idx": fr_i["frame_idx"],
+                               "timestamp_sec": fr_i.get("timestamp_sec", 0), "path": img_i}
+                        st.session_state.selected[(fb_vid, fr_i["frame_idx"])] = sel
+                        st.success(f"✅ Đã chọn frame {fr_i['frame_idx']}")
+
+
+            st.info(f"📋 CSV: `{fb_vid},{fb_fr['frame_idx']}`")
+        else:
+            st.warning(f"Không tìm thấy keyframe cho `{fb_vid}`")
+
+
+# =================================================================
+# Chọn loại query thủ công
+qtype_labels = {"kis": "🔍 KIS (Tìm video)", "qa": "❓ Q&A (Hỏi đáp)", "trake": "⏱️ TRAKE (Chuỗi sự kiện)"}
+manual_qtype = st.radio(
+    "Loại truy vấn:",
+    options=["kis", "qa", "trake"],
+    format_func=lambda x: qtype_labels[x],
+    index=["kis", "qa", "trake"].index(st.session_state.query_type),
+    horizontal=True,
+    key="manual_qtype",
+)
+# Cập nhật session state nếu người dùng đổi loại
+if manual_qtype != st.session_state.query_type:
+    st.session_state.query_type = manual_qtype
+
 col_q, col_btn = st.columns([5, 1])
 with col_q:
     query = st.text_input(
@@ -234,8 +312,8 @@ with col_btn:
 if search_clicked and query.strip():
     with st.spinner("Đang tìm kiếm (SigLIP2 + BGE-M3 + BM25 → fusion → rerank)..."):
         try:
-            q_type = qa_module.detect_query_type(query)
-            st.session_state.query_type = q_type
+            # Dùng lựa chọn thủ công thay vì auto-detect
+            q_type = st.session_state.query_type
             st.session_state.last_query = query
             
             if q_type == "trake":
@@ -254,13 +332,20 @@ if search_clicked and query.strip():
                 
             else:
                 search_q = qa_module.remove_qa_keywords(query) if q_type == "qa" else query
+                # Nếu cần nhiều hơn 10 kết quả → dùng fused (RRF, top 50) thay vì reranked (top 10)
+                need_more = top_k_display > 10
                 fused, reranked, verified = search_utils.full_search(
                     search_q, fusion_method=fusion_method, do_verify=do_verify,
-                    use_expansion=use_expansion
+                    use_expansion=use_expansion,
+                    top_k=max(top_k_display, 50) if need_more else None
                 )
-                st.session_state.last_results = (
-                    (verified if verified is not None else reranked)[:top_k_display]
-                )
+                if verified is not None:
+                    results_pool = verified
+                elif need_more:
+                    results_pool = fused  # fused có nhiều kết quả hơn reranked
+                else:
+                    results_pool = reranked
+                st.session_state.last_results = results_pool[:top_k_display]
         except Exception as e:
             import traceback
             st.error(f"❌ Lỗi: {str(e)}")

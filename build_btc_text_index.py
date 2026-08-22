@@ -22,6 +22,70 @@ from tqdm import tqdm
 import config
 from tokenizer_utils import get_tokenizer
 
+# =================================================================
+# BẢNG DỊCH NHÃN TIẾNG ANH → TIẾNG VIỆT (Faster R-CNN / Google Vision)
+# Giúp BM25 khớp query tiếng Việt với object labels tiếng Anh trong index.
+# Ví dụ: query "người đàn ông" → khớp với record chứa "Person người"
+# =================================================================
+_ENTITY_VI_MAP = {
+    "Person": "người",
+    "Man": "đàn ông người đàn ông",
+    "Woman": "phụ nữ người phụ nữ",
+    "Child": "trẻ em",
+    "Boy": "bé trai con trai",
+    "Girl": "bé gái con gái",
+    "Car": "xe ô tô xe hơi",
+    "Motorcycle": "xe máy",
+    "Bicycle": "xe đạp",
+    "Bus": "xe buýt xe bus",
+    "Truck": "xe tải",
+    "Van": "xe van",
+    "Vehicle": "phương tiện giao thông",
+    "Wheel": "bánh xe",
+    "Dog": "con chó chó",
+    "Cat": "con mèo mèo",
+    "Bird": "con chim chim",
+    "Horse": "con ngựa ngựa",
+    "Cow": "con bò bò",
+    "Elephant": "con voi voi",
+    "Tree": "cây cây xanh",
+    "Building": "tòa nhà công trình",
+    "House": "nhà",
+    "Road": "đường đường phố",
+    "Sky": "bầu trời",
+    "Water": "nước",
+    "Flag": "cờ",
+    "Chair": "ghế",
+    "Table": "bàn",
+    "Food": "thức ăn đồ ăn",
+    "Airplane": "máy bay",
+    "Train": "tàu hỏa xe lửa",
+    "Boat": "thuyền tàu",
+    "Police officer": "cảnh sát công an",
+    "Soldier": "binh sĩ lính",
+    "Traffic light": "đèn giao thông đèn tín hiệu",
+    "Helmet": "mũ bảo hiểm",
+    "Glasses": "kính mắt",
+    "Clothing": "quần áo",
+    "Ball": "bóng",
+    "Window": "cửa sổ",
+    "Door": "cửa",
+    "Crowd": "đám đông",
+    "Stage": "sân khấu",
+    "Microphone": "micro",
+    "Fire": "lửa cháy",
+    "Smoke": "khói",
+    "Boat": "thuyền",
+    "Sports equipment": "dụng cụ thể thao",
+    "Signage": "biển hiệu biển báo",
+}
+
+_ENTITY_VI_MAP_LOWER = {k.lower(): v for k, v in _ENTITY_VI_MAP.items()}
+
+def _get_vi_label(entity: str) -> str:
+    """Tra nhãn tiếng Việt cho một entity class. Trả về chuỗi rỗng nếu không tìm thấy."""
+    return _ENTITY_VI_MAP.get(entity) or _ENTITY_VI_MAP_LOWER.get(entity.lower(), "")
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -87,11 +151,16 @@ def build_btc_text_records():
                             class_counter[entity] = class_counter.get(entity, 0) + 1
                     
                     if class_counter:
-                        # Tạo text theo format: "Person Person Car Motorcycle" (lặp theo count)
-                        # Để BM25 exact-match hoạt động tốt hơn với từng từ
+                        # Tạo text theo format: "Person người Person người Car xe ô tô"
+                        # - Tiếng Anh: để BGE-M3 dense search (đã dịch sang Anh) khớp được
+                        # - Tiếng Việt: để BM25 exact-match khớp được query tiếng Việt
                         parts = []
                         for entity, count in sorted(class_counter.items(), key=lambda x: -x[1]):
-                            parts.extend([entity] * min(count, 3))  # tối đa 3 lần mỗi class
+                            vi_label = _get_vi_label(entity)
+                            for _ in range(min(count, 3)):  # tối đa 3 lần mỗi class
+                                parts.append(entity)
+                                if vi_label:
+                                    parts.append(vi_label)
                         text = " ".join(parts)
                         records.append({
                             "text": text,
