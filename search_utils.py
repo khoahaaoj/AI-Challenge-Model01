@@ -111,18 +111,18 @@ def load_indices():
             raise RuntimeError(
                 "Chưa có index/image_index.faiss. Hãy chạy `python build_index.py` trước!"
             )
-        _image_index = faiss.read_index(config.IMAGE_INDEX_PATH)
+        _image_index = faiss.read_index(config.IMAGE_INDEX_PATH, faiss.IO_FLAG_MMAP)
         _image_id_map = _load_json(config.IMAGE_ID_MAP_PATH)
 
     # SigLIP2 index — tự động load nếu đã build
     if _siglip_index is None and os.path.exists(_SIGLIP_INDEX_PATH):
         print("[Search] SigLIP2 index detected — loading...")
-        _siglip_index = faiss.read_index(_SIGLIP_INDEX_PATH)
+        _siglip_index = faiss.read_index(_SIGLIP_INDEX_PATH, faiss.IO_FLAG_MMAP)
         _siglip_id_map = _load_json(_SIGLIP_ID_MAP_PATH)
         print(f"[Search] SigLIP2 index: {_siglip_index.ntotal:,} vectors (dim={_siglip_index.d})")
 
     if _text_index is None and os.path.exists(config.TEXT_INDEX_PATH):
-        _text_index = faiss.read_index(config.TEXT_INDEX_PATH)
+        _text_index = faiss.read_index(config.TEXT_INDEX_PATH, faiss.IO_FLAG_MMAP)
         _text_id_map = _load_json(config.TEXT_ID_MAP_PATH)
 
     meta_cache_path = config.BTC_KF_META_CACHE if getattr(config, "USE_BTC_DATA", False) else config.KEYFRAME_META_CACHE
