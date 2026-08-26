@@ -8,6 +8,7 @@
 
 ## 🌟 Cập Nhật Mới Nhất
 
+*   **Tích hợp Nhánh Âm thanh (ASR)**: Bóc tách hơn 126k câu thoại từ `asr_results.json` vào nhánh Text (BGE-M3 & BM25), cải thiện đáng kể khả năng tìm kiếm video theo lời thoại nhân vật.
 *   **Sửa lỗi chuỗi TRAKE (Chronological Order)**: Sửa logic fallback đảm bảo chuỗi các keyframe kiện E1, E2, E3 luôn tuân thủ nghiêm ngặt thứ tự thời gian ($F_{E1} \le F_{E2} \le F_{E3}$).
 *   **Frame Browser UI**: Di chuyển và làm lại giao diện duyệt frame theo video_id ra màn hình chính, cho phép hiển thị ảnh to, dễ dàng chọn frame và lưu trực tiếp vào kết quả (Rất hữu ích để sửa lỗi tìm kiếm TRAKE thủ công).
 *   **Đóng gói tự động (fix_and_zip.py)**: Tự động format, loại bỏ các ký tự BOM ẩn, sửa lỗi dấu phẩy dư ở cuối, và nén các file CSV theo đúng chuẩn submission của BTC.
@@ -70,7 +71,7 @@ Hệ thống dùng **dữ liệu chính thức BTC** làm nguồn chính — kh�
          │
          ▼  build_btc_text_index.py
 ┌──────────────────── NHÁNH TEXT ─────────────────────────────────────────┐
-│  Gộp 3 nguồn text thành danh sách records:                              │
+│  Gộp 4 nguồn text thành danh sách records:                              │
 │                                                                          │
 │  [1] YouTube Metadata (video-level, 873 records):                       │
 │      "title + description[:500] + keywords + author"                    │
@@ -86,7 +87,11 @@ Hệ thống dùng **dữ liệu chính thức BTC** làm nguồn chính — kh�
 │      frame_idx khớp ground truth qua kf_seq_lookup (seq → frame_idx)   │
 │      → đại diện TEXT XUẤT HIỆN trong khung hình                        │
 │                                                                          │
-│      ↓ Tổng: 322,291 records (873 + 171,741 + 149,677)                 │
+│  [4] ASR (audio-level, ~126k records):                                 │
+│      Lời thoại bóc tách từ asr_results.json                            │
+│      → đại diện LỜI THOẠI TRONG VIDEO theo timestamp                   │
+│                                                                          │
+│      ↓ Tổng: 449,076 records (873 + 171,741 + 149,677 + 126,785)       │
 │  BGE-M3 (FlagEmbedding, đa ngôn ngữ vi+en, dim=1024, chạy CPU)         │
 │    → encode tất cả → FAISS IndexFlatIP                                  │
 │    → index/btc_text_index.faiss  +  btc_text_id_map.json               │
@@ -366,9 +371,9 @@ aic_retrieval/
     ├── btc_image_id_map.json
     ├── siglip_image_index.faiss   # SigLIP2-SO400M, dim=1152, 177,321 vectors
     ├── siglip_image_id_map.json
-    ├── btc_text_index.faiss       # BGE-M3, dim=1024, 322,291 records
+    ├── btc_text_index.faiss       # BGE-M3, dim=1024, 449,076 records
     ├── btc_text_id_map.json
-    └── btc_bm25_index.pkl         # BM25 Okapi, 322,291 records
+    └── btc_bm25_index.pkl         # BM25 Okapi, 449,076 records
 ```
 
 ---

@@ -224,6 +224,41 @@ def build_btc_text_records():
     else:
         print("  - Không tìm thấy ocr.json")
 
+    # 4. Load ASR (Audio-level)
+    asr_path = "asr_results.json"
+    if os.path.exists(asr_path):
+        asr_data = load_json(asr_path)
+        asr_count = 0
+        for video_id, full_text in asr_data.items():
+            lines = full_text.split("\n")
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if line.startswith("[") and "]:" in line:
+                        timestamp_part = line.split("]:")[0]
+                        text = line.split("]:", 1)[1].strip()
+                        if not text:
+                            continue
+                        
+                        start_str = timestamp_part.replace("[", "").split("-")[0].replace("s", "")
+                        timestamp_sec = float(start_str)
+                        
+                        records.append({
+                            "text": text,
+                            "source": "asr",
+                            "video_id": video_id,
+                            "frame_idx": None,
+                            "timestamp_sec": timestamp_sec
+                        })
+                        asr_count += 1
+                except Exception:
+                    pass
+        print(f"  + Đã thêm {asr_count} records từ ASR.")
+    else:
+        print("  - Không tìm thấy asr_results.json")
+
     return records
 
 def build_dense_text_index(records):
