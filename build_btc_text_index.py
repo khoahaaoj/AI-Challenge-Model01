@@ -316,7 +316,18 @@ def build_sparse_bm25_index(records):
 
 
 if __name__ == "__main__":
-    records = build_btc_text_records()
-    build_dense_text_index(records)
-    build_sparse_bm25_index(records)
+    all_records = build_btc_text_records()
+    
+    # Dense index (BGE-M3): dùng TẤT CẢ records kể cả ASR
+    # (BGE-M3 hiểu ngữ nghĩa lời thoại tiếng Việt rất tốt)
+    build_dense_text_index(all_records)
+    
+    # BM25 (sparse): CHỈ dùng records KHÔNG có ASR
+    # Lý do: BM25 exact-keyword với lời thoại hội thoại kém hiệu quả
+    # so với BGE-M3, nhưng lại tốn rất nhiều RAM (OOM risk).
+    # ASR đã được tìm kiếm tốt qua nhánh BGE-M3 Dense rồi.
+    non_asr_records = [r for r in all_records if r["source"] != "asr"]
+    print(f"\n[BM25] Dùng {len(non_asr_records)}/{len(all_records)} records (bỏ ASR để tiết kiệm RAM)")
+    build_sparse_bm25_index(non_asr_records)
+    
     print("\n🎉 Hoàn tất xây dựng BGE-M3 & BM25 cho BTC data!")
